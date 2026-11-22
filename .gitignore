@@ -1,0 +1,41 @@
+# Python 缓存 / 编译产物
+__pycache__/
+*.py[cod]
+*.spec
+build/
+dist/
+dist_simple/
+*.log
+
+# 构建验证临时脚本
+_test_*.py
+_verify_*.py
+
+# 旧版机器特定文档（已由根目录 README.md 取代）
+src/README.md
+
+# key 库随仓库分发（16MB，clone 即用，零下载依赖）；仅缓存可联网刷新
+# depotkeys_master.json  ← 故意不排除
+
+# 运行时缓存（含本机 appid 信息，不入仓库）
+auto_adapt_cache.json
+
+# 机器私有数据：账号 / 家庭组 / 备份 / appinfo 缓存，绝不入库
+backup*/
+ost_deploy_backup/
+localconfig.vdf
+appinfo.vdf
+appcache/
+userdata/
+*.acf
+
+# 备份/临时/诊断脚本
+*_backup*/
+_diag_*.py
+_screen.png
+
+# IDE / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

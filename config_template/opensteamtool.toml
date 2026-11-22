@@ -1,0 +1,38 @@
+# ============================================================
+# OpenSteamTool 显式配置（模板）
+# 用法：把本文件复制到【Steam 安装目录】（与 steam.exe 同级），
+#       文件名保持 opensteamtool.toml。Steam 运行时热重载，保存后几秒生效。
+# 未列出的项使用内置默认值。
+# ============================================================
+
+[log]
+# LEVEL: trace, debug, info, warn, error
+level = "info"
+
+[manifest]
+# manifest 请求码上游：opensteamtool / steamrun / wudrm
+# 国内网络一般 wudrm 可用；opensteamtool 常被 Cloudflare 拦。
+url = "wudrm"
+timeout_resolve_ms = 5000
+timeout_connect_ms = 5000
+timeout_send_ms = 10000
+timeout_recv_ms = 10000
+
+[stats]
+# 无 setStat 覆盖时查询统计 API（仅用于成就，与下载/票据无关）
+enable_api = true
+
+# 额外 Lua 目录。默认 <Steam>/config/lua 与 <Steam>/config/stplug-in 都会扫描。
+# 本工具的 mygames.lua 由 exe 自动写入 <Steam>/config/stplug-in/，一般无需改。
+[lua]
+paths = []
+
+# 可选：向游戏进程注入库（第三方联机补丁用，按需开启）
+# [inject]
+# path = "OnlineFix.dll"
+# when_cmdline = "-onlinefix"
+# all_games = true
+
+# 可选：自定义 metadata mirror，替换内置 GitHub→jsDelivr 源
+# [remote]
+# url_template = "https://your.server/{channel}/{component}/{sha256}.toml"

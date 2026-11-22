@@ -305,7 +305,10 @@ def build_block(appid, name="", info=None, mark_fmt="-- #OSTBLOCK:{}", end="-- #
                 lines.append('addappid(%s, 1, "%s")' % (did, k))
         for did, gid in manifest.items():
             if did in depots or str(did) == str(appid):
-                lines.append('setManifestid("%s", "%s")' % (did, gid))
+                # setManifestid 第一个参数必须是数字(depot id)，写成字符串会被静默忽略
+                # 导致锁定 GID 失效、下载仍走实时最新版。参见 README_ZH.md 官方签名。
+                did_arg = str(did) if str(did).isdigit() else '"%s"' % did
+                lines.append('setManifestid(%s, "%s")' % (did_arg, gid))
     else:
         lines.append("-- %s  [key 库无记录，仅显示图标]" % label)
         lines.append("addappid(%d)" % appid)

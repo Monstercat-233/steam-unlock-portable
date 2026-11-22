@@ -1,0 +1,14 @@
+{
+  "3489700": {
+    "name": "剑星 / Stellar Blade",
+    "crack": "Voices38 经典破解（替换文件，v1.4.1 可用；去 Denuvo/PSN SDK）",
+    "source": "用户提供的 锁定游戏版本(补丁失效情况).zip；备用 pan.baidu.com/s/1qe4Ynx2Jvf3ii0KTDnx0aA?pwd=jawr 提取码 jawr",
+    "version": "v1.4.1",
+    "locked_gids": {
+      "3489701": "2747626496734343426",
+      "3596180": "8344797041293440177",
+      "3596190": "6588499701851943951"
+    },
+    "verified": true
+  }
+}

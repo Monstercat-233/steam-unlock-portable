@@ -1,12 +1,23 @@
 # -*- coding: utf-8 -*-
-"""入库中心 v2 —— 统一 4-tab GUI。所有重活走后台线程，after() 回主线程更 UI。"""
+"""入库中心 v2 —— pywebview（WebView2）界面层。
+
+界面是唯一允许美化的层：后端 paths / auto_adapt / version_lock / apply_patch /
+backup / game_index / update_guard / denuvo_helper 的行为与函数签名完全沿用，
+所有文件路径一律经 paths.py 推导，界面资源走 resource_dir()，运行时可写状态走
+writable_dir()。
+
+前端是单文件 HTML（src/ui/index.html），通过 pywebview 的 js_api 桥调用下面的
+Bridge；每个方法统一返回 {"ok": bool, "data": ..., "error": str}。
+
+js_api 的每个调用由 pywebview 派发到独立工作线程，所以这里的耗时操作（联网、
+解包、扫描）不会冻结界面；前端只需处理 Promise。
+"""
 import os
 import re
 import sys
 import json
+import logging
 import threading
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
 
 import paths as P
 import auto_adapt as AA
@@ -16,10 +27,34 @@ import game_index as G
 import backup as B
 import update_guard as UG
 
+try:  # 界面层依赖；缺失时 main() 给出明确提示而不是 ImportError 崩溃
+    import webview
+except Exception:  # pragma: no cover - 仅环境缺失时触发
+    webview = None
+
 MARK_FMT = "-- #OSTBLOCK:{}"
 END_MARK = "-- #OSTENDBLOCK"
 
+APP_TITLE = "入库中心 · OpenSteamTool 全自动 v2"
+PREF_FILE = "ui_prefs.json"
+LOG_FILE = "ui_error.log"
+UI_DIR = "ui"
+UI_FILE = "index.html"
 
+# 前端主题（CSS 变量在 index.html 里定义，值为这里列出的键名）
+LIGHT_THEME = "light"
+DARK_THEME = "dark"
+THEME_CHOICES = [
+    ("dark", "深色 · Midnight"),
+    ("light", "浅色 · Daylight"),
+    ("nord", "深色 · Nord"),
+    ("solar", "浅色 · Solarized"),
+]
+
+LOG = logging.getLogger("ruku.ui")
+
+
+# ---------------------------------------------------------------- 纯函数（保持原语义）
 def format_judge(j):
     """(可下载, 运行标记, 联机标记, 说明) -> 一行人读文案。"""
     dl, run, online, desc = (list(j) + ["", "", "", ""])[:4]
@@ -40,7 +75,6 @@ def _upsert_block(appid, name, info):
     blk = AA.build_block(appid, name=name, info=info)
     lua = P.lua_path()
     txt = V.read_text()
-    # 用 version_lock 的 strip_game 逻辑清旧块，避免和锁定块共用标记
     newtxt = V.strip_game(txt, appid)
     if newtxt and not newtxt.endswith("\n"):
         newtxt += "\n"
@@ -50,88 +84,112 @@ def _upsert_block(appid, name, info):
     return blk
 
 
-class App:
-    def __init__(self, root):
-        self.root = root
-        root.title("入库中心 · OpenSteamTool 全自动 v2")
-        root.geometry("880x640")
-        self._build_top()
-        self.nb = ttk.Notebook(root)
-        self.nb.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-        self.tab_import = ttk.Frame(self.nb)
-        self.tab_lock = ttk.Frame(self.nb)
-        self.tab_patch = ttk.Frame(self.nb)
-        self.tab_backup = ttk.Frame(self.nb)
-        self.nb.add(self.tab_import, text="入库")
-        self.nb.add(self.tab_lock, text="版本锁定")
-        self.nb.add(self.tab_patch, text="补丁")
-        self.nb.add(self.tab_backup, text="备份与隔离")
-        self._build_import()
-        self._build_lock()
-        self._build_patch()
-        self._build_backup()
-        self._refresh_import_list()
-        self._startup_update_check()
+# ---------------------------------------------------------------- 偏好 / 资源定位 / 日志
+def _prefs_path():
+    return os.path.join(P.writable_dir(), PREF_FILE)
 
-    # ---------------- 顶部状态条
-    def _build_top(self):
-        bar = ttk.Frame(self.root)
-        bar.pack(fill="x", padx=8, pady=8)
-        self.lbl_status = ttk.Label(bar, text="", foreground="#0a6")
-        self.lbl_status.pack(side="left")
-        acc = P.current_account()
-        self.lbl_acc = ttk.Label(bar, text="账号: " + account_label(acc))
-        self.lbl_acc.pack(side="right")
-        running = P.steam_running()
-        self.lbl_status.config(
-            text=("Steam 运行中" if running else "Steam 未运行"),
-            foreground=("#0a6" if running else "#a60"),
-        )
 
-    def _bg(self, fn, done=None, err_prefix="操作失败"):
-        """后台执行 fn()，完成后 done(result) 回主线程。"""
-        def run():
-            try:
-                res = fn()
-            except Exception as e:
-                self.root.after(0, lambda e=e: messagebox.showerror("错误", "%s: %s" % (err_prefix, e)))
-                B.audit("error", err_prefix, [str(e)])
-                return
-            if done:
-                self.root.after(0, lambda: done(res))
-        threading.Thread(target=run, daemon=True).start()
+def load_prefs():
+    try:
+        with open(_prefs_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-    # ---------------- Tab 1: 入库
-    def _build_import(self):
-        f = self.tab_import
-        top = ttk.Frame(f)
-        top.pack(fill="x", padx=10, pady=10)
-        ttk.Label(top, text="游戏名 / AppID / 商店链接:").pack(side="left")
-        self.ent_game = ttk.Entry(top, width=42)
-        self.ent_game.pack(side="left", padx=6)
-        self.ent_game.bind("<Return>", lambda e: self.on_add())
-        ttk.Button(top, text="搜索名字", command=self.on_search).pack(side="left", padx=3)
-        ttk.Button(top, text="入库", command=self.on_add).pack(side="left", padx=3)
-        self.lst_hits = tk.Listbox(top, height=4, width=40)
-        self.lst_hits.pack(side="left", padx=6)
-        self.lst_hits.bind("<Double-Button-1>", self.on_pick_hit)
 
-        mid = ttk.Frame(f)
-        mid.pack(fill="both", expand=True, padx=10)
-        ttk.Label(mid, text="已入库游戏:").pack(anchor="w")
-        self.lst_lib = tk.Listbox(mid)
-        self.lst_lib.pack(fill="both", expand=True, side="left")
-        btns = ttk.Frame(mid)
-        btns.pack(side="left", fill="y", padx=6)
-        ttk.Button(btns, text="刷新", command=self._refresh_import_list).pack(fill="x", pady=2)
-        ttk.Button(btns, text="移除选中", command=self.on_remove).pack(fill="x", pady=2)
-        ttk.Button(btns, text="打开配置目录", command=self.on_open_dir).pack(fill="x", pady=2)
+def save_prefs(data):
+    try:
+        with open(_prefs_path(), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
 
-        self.lbl_import_status = ttk.Label(f, text="", wraplength=840, foreground="#444")
-        self.lbl_import_status.pack(fill="x", padx=10, pady=8)
 
-    def _refresh_import_list(self):
-        self.lst_lib.delete(0, "end")
+def _ui_path():
+    return os.path.join(P.resource_dir(), UI_DIR, UI_FILE)
+
+
+def _setup_logging():
+    """--windowed 下 stderr 会被丢弃，错误必须落文件（writable_dir 内）。"""
+    if LOG.handlers:
+        return
+    LOG.setLevel(logging.INFO)
+    try:
+        fh = logging.FileHandler(os.path.join(P.writable_dir(), LOG_FILE), encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        LOG.addHandler(fh)
+    except Exception:
+        pass
+
+    def _hook(exc_type, exc, tb):
+        LOG.error("未捕获异常", exc_info=(exc_type, exc, tb))
+
+    def _thook(args):
+        if args.exc_value is not None:
+            LOG.error(
+                "线程未捕获异常: %s",
+                getattr(args.thread, "name", "?"),
+                exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+            )
+
+    sys.excepthook = _hook
+    try:
+        threading.excepthook = _thook
+    except Exception:
+        pass
+
+
+FALLBACK_HTML = (
+    "<!doctype html><meta charset='utf-8'><body style=\"font-family:'Microsoft YaHei UI';"
+    "background:#0f1115;color:#e6e9ef;padding:32px\"><h2>入库中心</h2>"
+    "<p>界面资源 %s 缺失，请重新打包或从源码运行。</p></body>" % UI_FILE
+)
+
+
+def _load_html():
+    for p in (_ui_path(), os.path.join(os.path.dirname(os.path.abspath(__file__)), UI_DIR, UI_FILE)):
+        try:
+            with open(p, encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            continue
+    return FALLBACK_HTML
+
+
+# ---------------------------------------------------------------- js_api 桥
+class Bridge:
+    """pywebview 的 js_api 对象：每个方法返回 {ok, data, error}。
+
+    注意：js_api 的公开属性会被 pywebview 递归扫描并暴露给前端，
+    所以窗口句柄等内部状态一律用下划线前缀，避免无限递归。
+    """
+
+    def __init__(self):
+        prefs = load_prefs()
+        theme = prefs.get("theme") or DARK_THEME
+        if theme not in dict(THEME_CHOICES):
+            theme = DARK_THEME
+        self.theme = theme
+        self._window = None
+        self._accounts = []
+
+    # -- 统一返回
+    @staticmethod
+    def _ok(data=None):
+        return {"ok": True, "data": data, "error": ""}
+
+    def _err(self, exc, prefix):
+        LOG.error("%s: %s", prefix, exc, exc_info=True)
+        try:
+            B.audit("error", prefix, [str(exc)])
+        except Exception:
+            pass
+        return {"ok": False, "data": None, "error": "%s: %s" % (prefix, exc)}
+
+    # -- 数据快照
+    def _library(self):
         txt = V.read_text()
         ids = []
         for m in re.finditer(r"--\s*#OSTBLOCK:(\d+)", txt):
@@ -139,159 +197,188 @@ class App:
             if a not in ids:
                 ids.append(a)
         names = G.load_names()
-        for a in sorted(set(ids)):
-            self.lst_lib.insert("end", "%s  %s" % (a, names.get(str(a), "")))
+        return [{"appid": a, "name": names.get(str(a), "")} for a in sorted(set(ids))]
 
-    def on_search(self):
-        q = self.ent_game.get().strip()
-        if not q:
-            return
-        self.lbl_import_status.config(text="搜索中…")
-        self._bg(lambda: G.search(q), self._show_hits, "搜索失败")
+    def _locklib(self):
+        out = []
+        for appid, rec in sorted(V.load_library().items(), key=lambda x: int(x[0])):
+            gids = rec.get("locked_gids") or {}
+            out.append({
+                "appid": str(appid),
+                "name": rec.get("name", ""),
+                "gid_count": len(gids),
+            })
+        return out
 
-    def _show_hits(self, hits):
-        self.lst_hits.delete(0, "end")
-        self._hits = hits or []
-        for appid, name in self._hits:
-            self.lst_hits.insert("end", "%s  %s" % (appid, name))
-        self.lbl_import_status.config(text=("找到 %d 个，双击选用" % len(self._hits)) if self._hits else "本地+联网都没找到，可直接输数字 AppID")
+    def _snapshots(self):
+        out = []
+        if os.path.isdir(B.SNAPSHOT_ROOT):
+            for d in sorted(os.listdir(B.SNAPSHOT_ROOT), reverse=True):
+                full = os.path.join(B.SNAPSHOT_ROOT, d)
+                if os.path.isfile(os.path.join(full, "manifest.json")):
+                    out.append({"dir": full, "name": d})
+        return out
 
-    def on_pick_hit(self, event):
-        sel = self.lst_hits.curselection()
-        if not sel:
-            return
-        appid, name = self._hits[sel[0]]
-        self.ent_game.delete(0, "end")
-        self.ent_game.insert(0, str(appid))
+    def _account_payload(self):
+        accs = P.list_accounts()
+        self._accounts = accs
+        cur = P.current_account()
+        idx = 0
+        if cur:
+            for i, a in enumerate(accs):
+                if a.get("steam64") == cur.get("steam64"):
+                    idx = i
+                    break
+        return {
+            "current": account_label(cur),
+            "items": [{"label": account_label(a), "accountid": a.get("accountid")} for a in accs],
+            "index": idx if accs else -1,
+        }
 
-    def on_add(self):
-        arg = self.ent_game.get().strip()
-        if not arg:
-            messagebox.showwarning("提示", "请输入游戏名或 AppID")
-            return
-        self.lbl_import_status.config(text="联网解析中…（首次需查 depot/GID）")
+    def _audit_tail(self, n=12):
+        if not os.path.isfile(B.AUDIT_PATH):
+            return ""
+        try:
+            with open(B.AUDIT_PATH, encoding="utf-8", errors="replace") as f:
+                return "".join(f.readlines()[-n:])
+        except Exception:
+            return ""
 
-        def work():
+    # -- 启动
+    def boot(self):
+        try:
+            running = P.steam_running()
+            return self._ok({
+                "title": APP_TITLE,
+                "theme": self.theme,
+                "themes": [{"key": k, "label": v} for k, v in THEME_CHOICES],
+                "account": account_label(P.current_account()),
+                "steam_running": running,
+                "status": "Steam 运行中" if running else "Steam 未运行",
+                "lua_path": P.lua_path(),
+                "data_dir": P.writable_dir(),
+                "library": self._library(),
+                "locklib": self._locklib(),
+                "accounts": self._account_payload(),
+                "snapshots": self._snapshots(),
+                "audit": self._audit_tail(),
+            })
+        except Exception as e:
+            return self._err(e, "启动失败")
+
+    def update_check(self):
+        """启动只读自检：有变化才返回报告，否则返回空。"""
+        try:
+            UG.build_baseline()
+            items = UG.check_updates()
+            return self._ok({"report": UG.format_report(items) if items else "", "changed": bool(items)})
+        except Exception as e:
+            return self._err(e, "版本自检失败")
+
+    def set_theme(self, name):
+        if name in dict(THEME_CHOICES):
+            self.theme = name
+            prefs = load_prefs()
+            prefs["theme"] = name
+            save_prefs(prefs)
+            return self._ok(name)
+        return {"ok": False, "data": None, "error": "未知主题: %s" % name}
+
+    # -- Tab 1 入库
+    def list_library(self):
+        try:
+            return self._ok(self._library())
+        except Exception as e:
+            return self._err(e, "读取入库清单失败")
+
+    def search_games(self, query):
+        try:
+            q = (query or "").strip()
+            if not q:
+                return self._ok([])
+            hits = G.search(q) or []
+            return self._ok([{"appid": a, "name": n} for a, n in hits])
+        except Exception as e:
+            return self._err(e, "搜索失败")
+
+    def add_game(self, arg):
+        try:
+            arg = (arg or "").strip()
+            if not arg:
+                return {"ok": False, "data": None, "error": "请输入游戏名或 AppID"}
             appid, name0, err = AA.resolve(arg)
             if err or not appid:
-                return None, err or "解析失败"
+                return {"ok": False, "data": None, "error": err or "解析失败"}
             info = AA.fetch_app_info(appid)
             name = name0 or info.get("name") or str(appid)
-            if not info.get("depots"):
-                return (appid, name, info, False), "key 库无此游戏：可能只是空壳入库，下载不了"
-            _upsert_block(appid, name, info)
-            G.add_name(appid, name)
-            B.audit("add", str(appid), [P.lua_path()])
-            jd = AA.judge(appid, info)
-            return (appid, name, info, True), format_judge(jd)
-
-        def done(res):
-            payload, msg = res
-            if payload is None:
-                self.lbl_import_status.config(text="失败: " + msg, foreground="#b00")
-                return
-            appid, name, info, has_key = payload
-            color = "#b00" if not has_key else "#060"
-            self.lbl_import_status.config(text="已入库 %s %s | 仅本地判断: %s" % (appid, name, msg), foreground=color)
-            self._refresh_import_list()
-
-        self._bg(work, done, "入库失败")
-
-    def on_remove(self):
-        sel = self.lst_lib.curselection()
-        if not sel:
-            return
-        appid = int(self.lst_lib.get(sel[0]).split()[0])
-        if not messagebox.askyesno("确认", "从入库清单移除 AppID %s？" % appid):
-            return
-        txt = V.read_text()
-        newtxt = V.strip_game(txt, appid)
-        with open(P.lua_path(), "w", encoding="utf-8") as f:
-            f.write(newtxt)
-        B.audit("remove", str(appid), [P.lua_path()])
-        self._refresh_import_list()
-        self.lbl_import_status.config(text="已移除 %s" % appid, foreground="#060")
-
-    def on_open_dir(self):
-        d = os.path.dirname(P.lua_path())
-        try:
-            os.startfile(d)
+            has_key = bool(info.get("depots"))
+            if has_key:
+                _upsert_block(appid, name, info)
+                G.add_name(appid, name)
+                B.audit("add", str(appid), [P.lua_path()])
+                judge = format_judge(AA.judge(appid, info))
+                return self._ok({"appid": appid, "name": name, "has_key": True,
+                                 "judge": judge, "library": self._library()})
+            judge = format_judge(AA.judge(appid, info))
+            return self._ok({"appid": appid, "name": name, "has_key": False, "judge": judge,
+                             "message": "key 库无此游戏：可能只是空壳入库，下载不了",
+                             "library": self._library()})
         except Exception as e:
-            messagebox.showerror("错误", str(e))
+            return self._err(e, "入库失败")
 
-    # ---------------- Tab 2: 版本锁定
-    def _build_lock(self):
-        f = self.tab_lock
-        ttk.Label(f, text="D 加密游戏：锁定历史版本 GID → 下载后可打破解补丁").pack(anchor="w", padx=10, pady=(10, 4))
-        self.lst_lib_lock = tk.Listbox(f, height=8)
-        self.lst_lib_lock.pack(fill="x", padx=10)
-        btns = ttk.Frame(f)
-        btns.pack(fill="x", padx=10, pady=6)
-        ttk.Button(btns, text="刷新破解库", command=self._refresh_lock_list).pack(side="left", padx=3)
-        ttk.Button(btns, text="应用锁定到入库清单", command=self.on_lock_apply).pack(side="left", padx=3)
-        ttk.Button(btns, text="导入破解包(zip/目录/lua)", command=self.on_lock_import).pack(side="left", padx=3)
-        self.lbl_update_warn = ttk.Label(f, text="", wraplength=840, foreground="#b00", justify="left")
-        self.lbl_update_warn.pack(fill="x", padx=10)
-        guide = ("固定指引：①完全关闭 Steam  ②删除 <Steam>/appcache/appinfo.vdf  "
-                 "③冷启动 Steam  ④核对 content_log 的 Downloading GID 是锁定值  "
-                 "⑤下载完把暂存补丁覆盖进游戏目录再启动")
-        ttk.Label(f, text=guide, wraplength=840, foreground="#444", justify="left").pack(fill="x", padx=10, pady=8)
-        self.lbl_lock_status = ttk.Label(f, text="", wraplength=840, foreground="#444")
-        self.lbl_lock_status.pack(fill="x", padx=10)
-        self._refresh_lock_list()
+    def remove_game(self, appid):
+        try:
+            a = int(appid)
+            txt = V.read_text()
+            newtxt = V.strip_game(txt, a)
+            with open(P.lua_path(), "w", encoding="utf-8") as f:
+                f.write(newtxt)
+            B.audit("remove", str(a), [P.lua_path()])
+            return self._ok({"appid": a, "library": self._library()})
+        except Exception as e:
+            return self._err(e, "移除失败")
 
-    def _startup_update_check(self):
-        """后台跑一次只读版本自检；有变化才回主线程告警并弹窗。"""
-        self._bg(lambda: (UG.build_baseline(), UG.check_updates()),
-                 self._show_update_warn, "版本自检失败")
+    def open_lua_dir(self):
+        try:
+            d = os.path.dirname(P.lua_path())
+            os.startfile(d)
+            return self._ok(d)
+        except Exception as e:
+            return self._err(e, "打开目录失败")
 
-    def _show_update_warn(self, res):
-        items = res[1]
-        if items:
-            text = UG.format_report(items)
-            self.lbl_update_warn.config(text=text)
-            messagebox.showwarning("本体版本变化", text)
-        else:
-            self.lbl_update_warn.config(text="（启动自检完成，已锁定游戏版本正常）")
+    # -- Tab 2 版本锁定
+    def list_locklib(self):
+        try:
+            return self._ok(self._locklib())
+        except Exception as e:
+            return self._err(e, "读取破解库失败")
 
-    def _refresh_lock_list(self):
-        self.lst_lib_lock.delete(0, "end")
-        lib = V.load_library()
-        for appid, rec in sorted(lib.items(), key=lambda x: int(x[0])):
+    def apply_lock(self, appid):
+        try:
+            lib = V.load_library()
+            rec = lib.get(str(appid)) or lib.get(appid) or {}
             gids = rec.get("locked_gids") or {}
-            self.lst_lib_lock.insert("end", "%s  %s  (%d 个锁定 GID)" % (appid, rec.get("name", ""), len(gids)))
-        self._lock_lib = lib
-
-    def on_lock_apply(self):
-        sel = self.lst_lib_lock.curselection()
-        if not sel:
-            messagebox.showwarning("提示", "先在破解库里选中一个游戏")
-            return
-        appid = self.lst_lib_lock.get(sel[0]).split()[0]
-        rec = self._lock_lib.get(appid) or self._lock_lib.get(int(appid)) or {}
-        gids = rec.get("locked_gids") or {}
-        if not gids:
-            messagebox.showwarning("提示", "这条记录没有锁定 GID")
-            return
-        self.lbl_lock_status.config(text="解析中…")
-
-        def work():
+            if not gids:
+                return {"ok": False, "data": None, "error": "这条记录没有锁定 GID"}
             info = AA.fetch_app_info(int(appid))
             V.upsert_lock_block(int(appid), rec.get("name", ""), gids, info, note="GUI 应用锁定")
-            B.audit("lock", appid, [P.lua_path()])
-            return "已锁定 %s 的 %d 个 GID（%s）" % (appid, len(gids), rec.get("name", ""))
+            B.audit("lock", str(appid), [P.lua_path()])
+            return self._ok({"appid": appid, "gid_count": len(gids), "name": rec.get("name", ""),
+                             "library": self._library()})
+        except Exception as e:
+            return self._err(e, "锁定失败")
 
-        self._bg(work, lambda m: self.lbl_lock_status.config(text="仅本地判断: " + m, foreground="#060"), "锁定失败")
-
-    def on_lock_import(self):
-        path = filedialog.askopenfilename(title="选破解包(zip/lua)") or filedialog.askdirectory(title="或选破解包目录")
-        if not path:
-            return
-        self.lbl_lock_status.config(text="解析破解包中…")
-
-        def work():
+    def import_crackpack(self):
+        """先让用户选 zip/lua，取消则选目录；识别 AppID、锁定 GID、暂存补丁。"""
+        try:
+            path = self._pick_path(dialog="open", title="选破解包(zip/lua)")
+            if not path:
+                path = self._pick_path(dialog="folder", title="或选破解包目录")
+            if not path:
+                return self._ok(None)
+            if isinstance(path, (list, tuple)):
+                path = path[0]
             appid_s = os.path.basename(path).split("_")[0]
-            # 优先从 lua 文本里找 addappid 的 appid
             lvas, patch_files = V.find_patch_files(path)
             aid = None
             for lua in lvas:
@@ -302,7 +389,7 @@ class App:
             if aid is None and appid_s.isdigit():
                 aid = int(appid_s)
             if aid is None:
-                return None
+                return {"ok": False, "data": None, "error": "没从破解包里识别出 AppID，请手动在版本库补记录"}
             gids = {}
             for lua in lvas:
                 gids.update(V.extract_gids(lua))
@@ -317,173 +404,179 @@ class App:
             }
             V.save_library(lib)
             B.audit("import_patch", str(aid), staged[:5])
-            return aid, len(gids), len(staged)
+            return self._ok({"appid": aid, "gid_count": len(gids), "staged": len(staged),
+                             "locklib": self._locklib(), "library": self._library()})
+        except Exception as e:
+            return self._err(e, "导入破解包失败")
 
-        def done(res):
-            if not res:
-                self.lbl_lock_status.config(text="没从破解包里识别出 AppID，请手动在版本库补记录", foreground="#b00")
-                return
-            aid, ng, nf = res
-            self.lbl_lock_status.config(text="已导入 %s：%d 个 GID 锁定 + %d 个补丁文件暂存" % (aid, ng, nf), foreground="#060")
-            self._refresh_lock_list()
+    # -- Tab 3 补丁
+    def pick_patch(self):
+        try:
+            p = self._pick_path(dialog="open", title="选补丁包 zip")
+            if not p:
+                p = self._pick_path(dialog="folder", title="或选补丁目录")
+            if isinstance(p, (list, tuple)):
+                p = p[0] if p else ""
+            return self._ok(p or "")
+        except Exception as e:
+            return self._err(e, "选择补丁包失败")
 
-        self._bg(work, done, "导入破解包失败")
+    def scan_patch(self, appid, path, game_dir):
+        try:
+            appid_s = str(appid or "").strip()
+            if not appid_s.isdigit() or not path:
+                return {"ok": False, "data": None, "error": "填数字 AppID 和补丁包路径"}
+            aid = int(appid_s)
+            explicit = (game_dir or "").strip() or None
+            gd = AP.find_game_dir(aid, explicit)
+            items = AP.collect_patch_files(path, os.path.join(P.writable_dir(), "_ap_preview"))
+            return self._ok({
+                "appid": aid,
+                "game_dir": gd or "",
+                "items": [{"rel": rel, "src": os.path.basename(src)} for rel, src in items],
+            })
+        except Exception as e:
+            return self._err(e, "扫描失败")
 
-    # ---------------- Tab 3: 补丁
-    def _build_patch(self):
-        f = self.tab_patch
-        top = ttk.Frame(f)
-        top.pack(fill="x", padx=10, pady=10)
-        ttk.Label(top, text="AppID:").pack(side="left")
-        self.ent_patch_appid = ttk.Entry(top, width=12)
-        self.ent_patch_appid.insert(0, "3489700")
-        self.ent_patch_appid.pack(side="left", padx=4)
-        ttk.Label(top, text="补丁包:").pack(side="left", padx=(12, 2))
-        self.ent_patch_path = ttk.Entry(top, width=52)
-        self.ent_patch_path.pack(side="left", padx=4)
-        ttk.Button(top, text="浏览…", command=self.on_patch_browse).pack(side="left")
-        row2 = ttk.Frame(f)
-        row2.pack(fill="x", padx=10)
-        ttk.Button(row2, text="扫描预览(dry-run)", command=lambda: self.on_patch_apply(dry=True)).pack(side="left", padx=3)
-        ttk.Button(row2, text="确认覆盖", command=lambda: self.on_patch_apply(dry=False)).pack(side="left", padx=3)
-        ttk.Label(row2, text="游戏目录（留空自动查）:").pack(side="left", padx=(12, 2))
-        self.ent_game_dir = ttk.Entry(top, width=30)
-        self.lst_patch = tk.Listbox(f, height=14)
-        self.lst_patch.pack(fill="both", expand=True, padx=10, pady=8)
-        self.lbl_patch_status = ttk.Label(f, text="", wraplength=840, foreground="#444")
-        self.lbl_patch_status.pack(fill="x", padx=10)
-        # 游戏目录输入框放在 row2 下端
-        self.ent_game_dir = ttk.Entry(row2, width=34)
-        self.ent_game_dir.pack(side="left", padx=4)
+    def apply_patch(self, appid, path, game_dir):
+        try:
+            aid = int(str(appid).strip())
+            items = AP.collect_patch_files(path, os.path.join(P.writable_dir(), "_ap_preview"))
+            AP.apply(aid, path, game_dir, dry_run=False)
+            B.audit("patch", str(aid), [game_dir, path])
+            return self._ok({"appid": aid, "count": len(items), "game_dir": game_dir})
+        except Exception as e:
+            return self._err(e, "补丁覆盖失败")
 
-    def on_patch_browse(self):
-        p = filedialog.askopenfilename(title="选补丁 zip") or filedialog.askdirectory(title="或选补丁目录")
-        if p:
-            self.ent_patch_path.delete(0, "end")
-            self.ent_patch_path.insert(0, p)
+    # -- Tab 4 备份与隔离
+    def list_accounts(self):
+        try:
+            return self._ok(self._account_payload())
+        except Exception as e:
+            return self._err(e, "读取账号失败")
 
-    def on_patch_apply(self, dry=True):
-        appid_s = self.ent_patch_appid.get().strip()
-        path = self.ent_patch_path.get().strip()
-        if not appid_s.isdigit() or not path:
-            messagebox.showwarning("提示", "填数字 AppID 和补丁包路径")
-            return
-        appid = int(appid_s)
-        explicit = self.ent_game_dir.get().strip() or None
-        self.lbl_patch_status.config(text="扫描中…")
-        self._bg(
-            lambda: (AP.find_game_dir(appid, explicit), path),
-            lambda r: self._patch_do(r, appid, dry),
-            "扫描失败",
-        )
+    def backup_now(self, index):
+        try:
+            acc = None
+            i = int(index) if str(index).lstrip("-").isdigit() else -1
+            if 0 <= i < len(self._accounts):
+                acc = self._accounts[i]
+            aid = acc["accountid"] if acc else None
+            d = B.snapshot(B.default_targets(aid), label="manual")
+            return self._ok({"dir": d, "snapshots": self._snapshots()})
+        except Exception as e:
+            return self._err(e, "备份失败")
 
-    def _patch_do(self, res, appid, dry):
-        game_dir, path = res
-        items = AP.collect_patch_files(path, os.path.join(P.writable_dir(), "_ap_preview"))
-        self.lst_patch.delete(0, "end")
-        for rel, src in items:
-            self.lst_patch.insert("end", "%s  <-  %s" % (rel, os.path.basename(src)))
-        if not game_dir:
-            self.lbl_patch_status.config(text="没找到游戏目录（游戏可能还没下完），填左侧路径", foreground="#b00")
-            return
-        if dry:
-            self.lbl_patch_status.config(text="预览：%d 个文件将覆盖到 %s（未实际写入）" % (len(items), game_dir), foreground="#060")
-            return
-        if not messagebox.askyesno("确认覆盖", "把 %d 个文件覆盖进 %s？原文件会备份到游戏目录 _patch_backup" % (len(items), game_dir)):
-            return
-        AP.apply(appid, path, game_dir, dry_run=False)
-        B.audit("patch", str(appid), [game_dir, path])
-        self.lbl_patch_status.config(text="补丁已覆盖，原文件备份在游戏目录 _patch_backup", foreground="#060")
+    def health(self):
+        try:
+            return self._ok(B.health_check())
+        except Exception as e:
+            return self._err(e, "配置体检失败")
 
-    # ---------------- Tab 4: 备份与隔离
-    def _build_backup(self):
-        f = self.tab_backup
-        ttk.Label(f, text="账号（当前自动识别，可切换）:", wraplength=840).pack(anchor="w", padx=10, pady=(10, 2))
-        self.cmb_account = ttk.Combobox(f, state="readonly", width=56)
-        self.cmb_account.pack(fill="x", padx=10)
-        accs = P.list_accounts()
-        self._accounts = accs
-        cur = P.current_account()
-        self.cmb_account["values"] = [account_label(a) for a in accs] or ["<无账号>"]
-        idx = 0
-        if cur:
-            for i, a in enumerate(accs):
-                if a["steam64"] == cur["steam64"]:
-                    idx = i
-                    break
-        self.cmb_account.current(idx if accs else 0)
+    def list_snapshots(self):
+        try:
+            return self._ok({"snapshots": self._snapshots(), "audit": self._audit_tail()})
+        except Exception as e:
+            return self._err(e, "读取快照失败")
 
-        row = ttk.Frame(f)
-        row.pack(fill="x", padx=10, pady=8)
-        ttk.Button(row, text="立即备份所选账号配置", command=self.on_backup).pack(side="left", padx=3)
-        ttk.Button(row, text="配置体检", command=self.on_health).pack(side="left", padx=3)
-        ttk.Button(row, text="刷新快照列表", command=self._refresh_snaps).pack(side="left", padx=3)
-        ttk.Label(row, text="回滚前会强制检查 Steam 必须已退出", foreground="#a60").pack(side="left", padx=10)
+    def rollback(self, snap_dir):
+        try:
+            if P.steam_running():
+                return {"ok": False, "data": None,
+                        "error": "Steam 正在运行。请完全退出 Steam 后再回滚（回滚会覆盖配置文件）。"}
+            if not snap_dir or not os.path.isdir(snap_dir):
+                return {"ok": False, "data": None, "error": "快照目录不存在"}
+            ok = B.rollback(snap_dir)
+            return self._ok({"ok": bool(ok), "dir": snap_dir, "snapshots": self._snapshots()})
+        except Exception as e:
+            return self._err(e, "回滚失败")
 
-        ttk.Label(f, text="快照:").pack(anchor="w", padx=10)
-        self.lst_snaps = tk.Listbox(f, height=6)
-        self.lst_snaps.pack(fill="x", padx=10)
-        ttk.Button(f, text="回滚到选中快照", command=self.on_rollback).pack(anchor="w", padx=10, pady=6)
-        self.txt_report = tk.Text(f, height=10)
-        self.txt_report.pack(fill="both", expand=True, padx=10, pady=6)
-        ttk.Label(f, text="提示：改不了“来自家庭库”显示 / 正版联机——那是 Steam 服务器判定，本地工具只做快照与回滚。",
-                  wraplength=840, foreground="#a60").pack(fill="x", padx=10, pady=(0, 8))
-        self._refresh_snaps()
+    # -- 文件对话框
+    def _pick_path(self, dialog="open", title="选择"):
+        if self._window is None or webview is None:
+            return ""
+        try:
+            fd = getattr(webview, "FileDialog", None)
+            if dialog == "folder":
+                kind = fd.FOLDER if fd is not None else webview.FOLDER_DIALOG
+                r = self._window.create_file_dialog(kind, allow_multiple=False)
+            else:
+                kind = fd.OPEN if fd is not None else webview.OPEN_DIALOG
+                r = self._window.create_file_dialog(
+                    kind,
+                    allow_multiple=False,
+                    file_types=("Zip / Lua (*.zip;*.lua)", "所有文件 (*.*)"),
+                )
+        except Exception as e:
+            LOG.warning("文件对话框失败: %s", e)
+            return ""
+        if not r:
+            return ""
+        return r[0] if isinstance(r, (list, tuple)) else r
 
-    def _sel_account(self):
-        i = self.cmb_account.current()
-        if 0 <= i < len(self._accounts):
-            return self._accounts[i]
-        return None
+    # -- 主题（前端也可直接改 CSS 变量，这里只做持久化）
+    def reload_theme(self):
+        return self._ok(self.theme)
 
-    def _refresh_snaps(self):
-        self.lst_snaps.delete(0, "end")
-        self._snaps = []
-        if os.path.isdir(B.SNAPSHOT_ROOT):
-            for d in sorted(os.listdir(B.SNAPSHOT_ROOT)):
-                full = os.path.join(B.SNAPSHOT_ROOT, d)
-                if os.path.isfile(os.path.join(full, "manifest.json")):
-                    self._snaps.append(full)
-                    self.lst_snaps.insert("end", d)
-        self.txt_report.delete("1.0", "end")
-        if os.path.isfile(B.AUDIT_PATH):
-            lines = open(B.AUDIT_PATH, encoding="utf-8", errors="replace").readlines()[-12:]
-            self.txt_report.insert("end", "最近审计:\n" + "".join(lines))
 
-    def on_backup(self):
-        acc = self._sel_account()
-        aid = acc["accountid"] if acc else None
-        d = B.snapshot(B.default_targets(aid), label="manual")
-        self.txt_report.insert("end", "已备份到: %s\n" % d)
-        self._refresh_snaps()
+# ---------------------------------------------------------------- 启动
+def _after_start():
+    """start(func) 回调：跑在工作线程，可安全调用窗口 API。
 
-    def on_health(self):
-        h = B.health_check()
-        self.txt_report.delete("1.0", "end")
-        self.txt_report.insert("end", "配置体检（只读）:\n" + json.dumps(h, ensure_ascii=False, indent=2) + "\n")
+    exe 图标由 spec 的 icon= 嵌入，窗口标题栏会自动采用，这里不再改 native，
+    只记录版本号，方便现场排查。
+    """
+    try:
+        LOG.info("界面已启动，版本 %s", _webview_version())
+    except Exception as e:
+        LOG.warning("启动钩子异常: %s", e)
 
-    def on_rollback(self):
-        sel = self.lst_snaps.curselection()
-        if not sel:
-            messagebox.showwarning("提示", "先选一个快照")
-            return
-        d = self._snaps[sel[0]]
-        if P.steam_running():
-            messagebox.showerror("无法回滚", "Steam 正在运行。请完全退出 Steam 后再回滚（回滚会覆盖配置文件）。")
-            return
-        if not messagebox.askyesno("确认回滚", "把配置回滚到 %s？当前状态会先自动打一份快照。" % os.path.basename(d)):
-            return
-        ok = B.rollback(d)
-        self.txt_report.insert("end", ("回滚成功: " if ok else "回滚失败(校验未过): ") + d + "\n")
-        if ok:
-            messagebox.showinfo("完成", "回滚成功。现在可以启动 Steam。")
-        self._refresh_snaps()
+
+def _webview_version():
+    try:
+        from webview import _version
+
+        return getattr(_version, "__version__", "?")
+    except Exception:
+        return "?"
 
 
 def main():
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    _setup_logging()
+    prefs = load_prefs()
+    theme = prefs.get("theme") or DARK_THEME
+    if theme not in dict(THEME_CHOICES):
+        theme = DARK_THEME
+
+    if webview is None:
+        _fatal("未安装 pywebview，无法启动界面。\n请在 Python 环境执行: pip install pywebview")
+        return
+
+    LOG.info("启动 %s（主题 %s，pywebview %s）", APP_TITLE, theme, _webview_version())
+
+    bridge = Bridge()
+    html = _load_html()
+    window = webview.create_window(
+        APP_TITLE,
+        html=html,
+        js_api=bridge,
+        width=1060,
+        height=760,
+        min_size=(940, 660),
+        background_color="#0b0e14",
+        text_select=True,
+    )
+    bridge._window = window
+    webview.start(func=_after_start, debug=False, private_mode=False)
+
+
+def _fatal(msg):
+    """无界面依赖时的兜底提示（不引 tkinter，保持单一 UI 栈）。"""
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, msg, APP_TITLE, 0x10)
+    except Exception:
+        print(msg, file=sys.stderr)
 
 
 if __name__ == "__main__":

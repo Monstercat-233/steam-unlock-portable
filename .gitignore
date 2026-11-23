@@ -21,6 +21,9 @@ src/README.md
 auto_adapt_cache.json
 
 # 机器私有数据：账号 / 家庭组 / 备份 / appinfo 缓存，绝不入库
+audit.log
+baseline.json
+auto_adapt_cache.json
 backup*/
 ost_deploy_backup/
 localconfig.vdf

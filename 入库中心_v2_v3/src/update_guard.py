@@ -67,11 +67,16 @@ def read_acf(appid, dirs=None):
         target = field("TargetBuildID")
         install = field("installdir")
         gids = dict(re.findall(r'"(\d{4,})"\s*\{\s*"manifest"\s+"(\d+)"', text))
+        # 自动更新预约字段：只用于启动告警，不进基线（避免基线本身记 1 导致漏报）。
+        auto_behavior = field("AutoUpdateBehavior") or "0"
+        scheduled = field("ScheduledAutoUpdate") or "0"
         return {
             "buildid": buildid,
             "target_buildid": target or buildid,
             "install_dir": install,
             "manifest_gids": gids,
+            "auto_update_behavior": auto_behavior,
+            "scheduled_auto_update": scheduled,
         }
     return None
 
@@ -158,6 +163,15 @@ def check_updates():
             now = current["manifest_gids"].get(str(depot))
             if now != gid:
                 reasons.append(f"depot {depot} manifest 变化：锁定 {gid} → 当前 {now}")
+        # 第 4 判据：Steam 被设成自动更新/已预约更新时间（与 v1.4.1 锁定版冲突）。
+        auto_behavior = current.get("auto_update_behavior", "0")
+        scheduled = current.get("scheduled_auto_update", "0")
+        if auto_behavior not in ("", "0") or scheduled not in ("", "0"):
+            reasons.append(
+                f"自动更新被开启：AutoUpdateBehavior={auto_behavior}，"
+                f"ScheduledAutoUpdate={scheduled}；"
+                "请停止 Steam 后把这两项改为 0 并冷启动（Steam 运行时改会被覆盖）"
+            )
         if reasons:
             items.append({
                 "appid": str(appid),
@@ -181,4 +195,8 @@ def format_report(items):
             lines.append(f"    · {reason}")
         lines.append(f"    建议：{it.get('advice', '')}")
     lines.append("请到版本锁定 tab 重锁重打后再启动游戏。")
+    lines.append(
+        "若为自动更新告警：停 Steam → 备份 appmanifest_<appid>.acf → "
+        "把 AutoUpdateBehavior 与 ScheduledAutoUpdate 改为 0 → 冷启动。"
+    )
     return "\n".join(lines)

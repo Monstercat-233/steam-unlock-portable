@@ -193,6 +193,43 @@ td .muted{color:var(--fg3)}
 .empty{padding:26px 14px;text-align:center;color:var(--fg3);font-size:12.5px}
 .empty b{display:block;color:var(--fg2);font-weight:600;margin-bottom:3px}
 
+/* ---------------------------------------------------------------- 封面卡片墙 */
+.cover-grid{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(152px,1fr));
+  gap:12px;padding:4px 2px 8px;max-height:322px;overflow:auto;
+}
+.gcard{
+  position:relative;border:1px solid var(--line);border-radius:var(--r-md);
+  background:var(--card2);overflow:hidden;cursor:pointer;
+  transition:transform var(--t),border-color var(--t),box-shadow var(--t);
+}
+.gcard:hover{transform:translateY(-2px);border-color:var(--accent);box-shadow:var(--shadow)}
+.gcard.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),var(--shadow)}
+.gcard .thumb{
+  position:relative;width:100%;aspect-ratio:460/215;background-color:var(--bg2);
+  background-position:center;background-size:cover;background-repeat:no-repeat;
+}
+.gcard .thumb.noimg{
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 460 215'%3E%3Crect width='460' height='215' fill='%231a2230'/%3E%3Cg fill='none' stroke='%2366773a' stroke-width='7' stroke-linecap='round'%3E%3Cpath d='M60 108v40h60v-40zM55 118a12 12 0 0 1 12-12h20a12 12 0 0 1 12 12v10H55zM125 118a12 12 0 0 1 12-12h20a12 12 0 0 1 12 12v10h-44z'/%3E%3Cpath d='M60 128h60'/%3E%3C/g%3E%3C/svg%3E");
+}
+.gcard .thumb::after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:linear-gradient(180deg,transparent 55%,rgba(0,0,0,.28));
+}
+.gcard .meta{padding:8px 10px 10px;min-height:58px}
+.gcard .aid{font-family:var(--mono);font-size:10.5px;color:var(--fg3);letter-spacing:.03em}
+.gcard .gname{
+  font-size:12.5px;color:var(--fg);font-weight:600;line-height:1.35;margin-top:2px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.gcard .use{
+  position:absolute;top:7px;right:7px;z-index:1;height:24px;padding:0 9px;font-size:11px;
+  border-radius:6px;border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 88%,transparent);
+  color:var(--accent-fg);opacity:0;transition:opacity var(--t);
+}
+.gcard:hover .use{opacity:1}
+.cover-hint{font-size:11.5px;color:var(--fg3);padding:2px 4px 8px}
+
 /* ---------------------------------------------------------------- 提示条 / 状态 */
 .note{
   display:flex;gap:9px;align-items:flex-start;padding:10px 12px;border-radius:var(--r-md);
@@ -334,12 +371,7 @@ footer .path{font-family:var(--mono);font-size:10.5px;opacity:.8;max-width:46%;o
               入库
             </button>
           </div>
-          <div class="tbl-wrap" style="margin-top:12px">
-            <table>
-              <thead><tr><th class="num">AppID</th><th>名称</th><th style="width:88px"></th></tr></thead>
-              <tbody id="tb-hits"></tbody>
-            </table>
-          </div>
+          <div id="tb-hits" class="cover-grid" style="margin-top:12px"></div>
           <div class="inline-status" id="st-import"></div>
         </div>
       </div>
@@ -354,12 +386,7 @@ footer .path{font-family:var(--mono);font-size:10.5px;opacity:.8;max-width:46%;o
           <button class="sm danger" id="btn-remove">移除选中</button>
         </div>
         <div class="bd tight">
-          <div class="tbl-wrap">
-            <table>
-              <thead><tr><th class="num">AppID</th><th>名称</th></tr></thead>
-              <tbody id="tb-lib"></tbody>
-            </table>
-          </div>
+          <div id="tb-lib" class="cover-grid"></div>
         </div>
       </div>
     </section>
@@ -563,6 +590,63 @@ function confirmBox(title, body, yesLabel) {
   });
 }
 
+/* 封面缓存：data URL 写入 sessionStorage 不可靠（origin=null），用内存 Map */
+const COVERS = new Map();  /* appid -> data URL 或 ""(无封面) */
+
+function coverUrl(appid) {
+  return COVERS.get(String(appid)) || '';
+}
+
+function coverCard(g, opts) {
+  const o = opts || {};
+  const div = document.createElement('div');
+  div.className = 'gcard' + (o.sel ? ' sel' : '');
+  div.dataset.appid = String(g.appid);
+  const src = coverUrl(g.appid);
+  div.innerHTML = '<div class="thumb' + (src ? '' : ' noimg') + '"></div>' +
+    '<div class="meta"><div class="aid"></div><div class="gname"></div></div>';
+  if (src) div.firstChild.style.backgroundImage = 'url("' + src + '")';
+  div.querySelector('.aid').textContent = 'AppID ' + g.appid;
+  div.querySelector('.gname').textContent = g.name || '<未命名>';
+  if (o.use) {
+    const b = document.createElement('button');
+    b.className = 'use'; b.textContent = '选用';
+    b.addEventListener('click', (e) => { e.stopPropagation(); if (o.onUse) o.onUse(g); });
+    div.appendChild(b);
+  }
+  if (o.onPick) div.addEventListener('click', () => {
+    $$('.cover-grid .gcard').forEach((x) => x.classList.remove('sel'));
+    div.classList.add('sel');
+    o.onPick(g);
+  });
+  if (o.onOpen) div.addEventListener('dblclick', () => o.onOpen(g));
+  return div;
+}
+
+function paintCovers() {
+  $$('.gcard').forEach((card) => {
+    const src = coverUrl(card.dataset.appid);
+    const thumb = card.querySelector('.thumb');
+    if (src) { thumb.classList.remove('noimg'); thumb.style.backgroundImage = 'url("' + src + '")'; }
+    else { thumb.classList.add('noimg'); thumb.style.backgroundImage = ''; }
+  });
+}
+
+async function loadCovers(list) {
+  const ids = [];
+  (list || []).forEach((g) => { const s = String(g.appid); if (s && ids.indexOf(s) < 0) ids.push(s); });
+  const pending = ids.filter((s) => !COVERS.has(s));
+  if (!pending.length) { paintCovers(); return; }
+  try {
+    const data = await call('covers', pending);
+    Object.keys(data || {}).forEach((k) => COVERS.set(k, data[k] || ''));
+    paintCovers();
+  } catch (e) {
+    pending.forEach((s) => COVERS.set(s, ''));
+    paintCovers();
+  }
+}
+
 /* 调后端：统一处理 {ok,data,error} */
 async function call(name, ...args) {
   if (!API) throw new Error('pywebview 桥未就绪');
@@ -587,44 +671,30 @@ function busy(btn, on) {
 
 /* ================================================================ 渲染 */
 function renderHits(hits) {
-  const tb = $('#tb-hits');
-  tb.innerHTML = '';
+  const box = $('#tb-hits');
+  box.innerHTML = '';
   if (!hits || !hits.length) {
-    tb.innerHTML = '<tr><td colspan="3"><div class="empty"><b>没有搜索结果</b>本地库 + 联网都没找到时，可直接输入数字 AppID 入库</div></td></tr>';
+    box.innerHTML = '<div class="empty"><b>没有搜索结果</b>本地库 + 联网都没找到时，可直接输入数字 AppID 入库</div>';
     return;
   }
-  hits.forEach((h) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = '<td class="num"></td><td></td><td><button class="sm ghost">选用</button></td>';
-    tr.children[0].textContent = h.appid;
-    tr.children[1].textContent = h.name || '';
-    const use = () => { $('#q').value = String(h.appid); footer('已选择 ' + h.appid + ' ' + (h.name || '')); };
-    tr.children[2].firstChild.addEventListener('click', use);
-    tr.addEventListener('dblclick', use);
-    tb.appendChild(tr);
-  });
+  const use = (h) => { $('#q').value = String(h.appid); footer('已选择 ' + h.appid + ' ' + (h.name || '')); };
+  hits.forEach((h) => box.appendChild(coverCard(h, { use: true, onUse: use, onOpen: use })));
+  loadCovers(hits);
 }
 
 function renderLibrary(list) {
-  const tb = $('#tb-lib');
-  tb.innerHTML = '';
+  const box = $('#tb-lib');
+  box.innerHTML = '';
   $('#lib-count').textContent = '共 ' + (list ? list.length : 0) + ' 个 AppID';
   if (!list || !list.length) {
-    tb.innerHTML = '<tr><td colspan="2"><div class="empty"><b>还没有入库记录</b>在上方搜索或直接输入 AppID</div></td></tr>';
+    box.innerHTML = '<div class="empty"><b>还没有入库记录</b>在上方搜索或直接输入 AppID</div>';
     return;
   }
-  list.forEach((g) => {
-    const tr = document.createElement('tr');
-    tr.innerHTML = '<td class="num"></td><td></td>';
-    tr.children[0].textContent = g.appid;
-    tr.children[1].textContent = g.name || '<未命名>';
-    tr.addEventListener('click', () => {
-      $$('#tb-lib tr').forEach((x) => x.classList.remove('sel'));
-      tr.classList.add('sel');
-      selectedAppid = g.appid;
-    });
-    tb.appendChild(tr);
-  });
+  list.forEach((g) => box.appendChild(coverCard(g, {
+    sel: String(selectedAppid) === String(g.appid),
+    onPick: (x) => { selectedAppid = x.appid; },
+  })));
+  loadCovers(list);
 }
 
 function renderLock(list) {
@@ -768,7 +838,7 @@ async function doAdd() {
 }
 
 async function doRemove() {
-  if (selectedAppid == null) { toast('先在列表里选一行', 'warn'); return; }
+  if (selectedAppid == null) { toast('先在游戏卡片里选一个', 'warn'); return; }
   const ok = await confirmBox('移除入库记录', '从 mygames.lua 里移除 AppID ' + selectedAppid + '？', '移除');
   if (!ok) return;
   try {

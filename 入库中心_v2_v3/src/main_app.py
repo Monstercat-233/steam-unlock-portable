@@ -16,8 +16,11 @@ import os
 import re
 import sys
 import json
+import base64
 import logging
 import threading
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 import paths as P
 import auto_adapt as AA
@@ -40,6 +43,7 @@ PREF_FILE = "ui_prefs.json"
 LOG_FILE = "ui_error.log"
 UI_DIR = "ui"
 UI_FILE = "index.html"
+COVER_DIR = "covers"
 
 # 前端主题（CSS 变量在 index.html 里定义，值为这里列出的键名）
 LIGHT_THEME = "light"
@@ -156,6 +160,76 @@ def _load_html():
         except Exception:
             continue
     return FALLBACK_HTML
+
+
+# ---------------------------------------------------------------- 封面（Steam CDN + 本地缓存）
+COVER_URLS = (
+    "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{appid}/header.jpg",
+    "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
+)
+
+
+def _cover_dir():
+    """封面缓存目录：一律走 paths.writable_dir()，frozen 下即 exe 同目录。"""
+    return os.path.join(P.writable_dir(), COVER_DIR)
+
+
+def _fetch_cover(appid):
+    """下载单个 AppID 的 header.jpg，成功返回 JPEG bytes，失败返回 None。
+
+    只用标准库；先 fastly 后 cloudflare，8s 超时；校验 JPEG SOI 头，防止把
+    错误页/占位文本缓存下来。
+    """
+    try:
+        aid = int(appid)
+        if aid <= 0:
+            return None
+    except (TypeError, ValueError):
+        return None
+    for tpl in COVER_URLS:
+        try:
+            req = urllib.request.Request(
+                tpl.format(appid=aid),
+                headers={"User-Agent": "Mozilla/5.0 (RukuCenter/2)"},
+            )
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = resp.read()
+            if data[:2] == b"\xff\xd8" and len(data) > 1024:
+                return data
+        except Exception:
+            continue
+    return None
+
+
+def _cover_data_url(appid):
+    """取一个 AppID 的封面 data URL：命中缓存直接用，否则下载后落盘缓存。"""
+    try:
+        aid = str(int(appid))
+    except (TypeError, ValueError):
+        return ""
+    cache = os.path.join(_cover_dir(), aid + ".jpg")
+    data = None
+    try:
+        if os.path.isfile(cache) and os.path.getsize(cache) > 1024:
+            with open(cache, "rb") as f:
+                data = f.read()
+            if data[:2] != b"\xff\xd8":
+                data = None
+    except OSError:
+        data = None
+    if not data:
+        data = _fetch_cover(aid)
+        if not data:
+            return ""
+        try:
+            os.makedirs(_cover_dir(), exist_ok=True)
+            tmp = cache + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, cache)
+        except OSError:
+            pass
+    return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
 
 
 # ---------------------------------------------------------------- js_api 桥
@@ -290,6 +364,29 @@ class Bridge:
             return self._ok(self._library())
         except Exception as e:
             return self._err(e, "读取入库清单失败")
+
+    def covers(self, appids):
+        """批量取封面 data URL；并发下载并缓存，失败项返回空串（前端显示占位图）。"""
+        try:
+            ids = []
+            for a in (appids or []):
+                s = str(a)
+                if s not in ids:
+                    ids.append(s)
+            ids = ids[:120]  # 防止异常调用拉爆
+            if not ids:
+                return self._ok({})
+            out = {}
+
+            def one(a):
+                return a, _cover_data_url(a)
+
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                for a, url in pool.map(one, ids):
+                    out[a] = url
+            return self._ok(out)
+        except Exception as e:
+            return self._err(e, "读取封面失败")
 
     def search_games(self, query):
         try:

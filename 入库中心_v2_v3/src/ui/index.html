@@ -228,7 +228,30 @@ td .muted{color:var(--fg3)}
   color:var(--accent-fg);opacity:0;transition:opacity var(--t);
 }
 .gcard:hover .use{opacity:1}
+.gcard .badge{
+  position:absolute;top:7px;left:7px;z-index:1;max-width:calc(100% - 14px);
+  padding:2px 7px;border-radius:5px;font-size:10px;font-weight:700;letter-spacing:.02em;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  background:rgba(12,15,20,.82);backdrop-filter:blur(4px);border:1px solid transparent;
+}
+.gcard .badge.owned{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 55%,transparent)}
+.gcard .badge.tool{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,transparent)}
+.gcard .src{
+  font-size:10px;color:var(--fg3);margin-top:3px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
 .cover-hint{font-size:11.5px;color:var(--fg3);padding:2px 4px 8px}
+.cover-filter{display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:2px 4px 10px}
+.cover-filter .fl{font-size:11.5px;color:var(--fg3)}
+.cover-filter button{
+  font-size:11px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);
+  background:var(--card2);color:var(--fg2);cursor:pointer;transition:all var(--t);
+}
+.cover-filter button:hover{border-color:var(--accent)}
+.cover-filter button.on{
+  border-color:var(--accent);background:color-mix(in srgb,var(--accent) 16%,var(--card2));
+  color:var(--accent);font-weight:600;
+}
 
 /* ---------------------------------------------------------------- 提示条 / 状态 */
 .note{
@@ -386,6 +409,13 @@ footer .path{font-family:var(--mono);font-size:10.5px;opacity:.8;max-width:46%;o
           <button class="sm danger" id="btn-remove">移除选中</button>
         </div>
         <div class="bd tight">
+          <div class="cover-filter" id="lib-filter">
+            <span class="fl">来源</span>
+            <button type="button" data-f="all" class="on">全部</button>
+            <button type="button" data-f="owned">Steam 已拥有</button>
+            <button type="button" data-f="tool">工具入库</button>
+            <span class="fl" id="lib-filter-count"></span>
+          </div>
           <div id="tb-lib" class="cover-grid"></div>
         </div>
       </div>
@@ -602,12 +632,24 @@ function coverCard(g, opts) {
   const div = document.createElement('div');
   div.className = 'gcard' + (o.sel ? ' sel' : '');
   div.dataset.appid = String(g.appid);
+  div.dataset.origin = g.origin || '';
   const src = coverUrl(g.appid);
   div.innerHTML = '<div class="thumb' + (src ? '' : ' noimg') + '"></div>' +
     '<div class="meta"><div class="aid"></div><div class="gname"></div></div>';
   if (src) div.firstChild.style.backgroundImage = 'url("' + src + '")';
   div.querySelector('.aid').textContent = 'AppID ' + g.appid;
-  div.querySelector('.gname').textContent = g.name || '<未命名>';
+  div.querySelector('.gname').textContent = g.name || 'AppID ' + g.appid;
+  if (g.origin_label) {
+    const b = document.createElement('div');
+    b.className = 'badge ' + (g.origin === 'owned' ? 'owned' : 'tool');
+    b.textContent = g.origin_label;
+    div.querySelector('.thumb').appendChild(b);
+  }
+  if (g.source) {
+    const s = document.createElement('div');
+    s.className = 'src'; s.textContent = g.source; s.title = g.source;
+    div.querySelector('.meta').appendChild(s);
+  }
   if (o.use) {
     const b = document.createElement('button');
     b.className = 'use'; b.textContent = '选用';
@@ -682,19 +724,26 @@ function renderHits(hits) {
   loadCovers(hits);
 }
 
+let LIBRARY = [], LIB_FILTER = 'all';
+
 function renderLibrary(list) {
   const box = $('#tb-lib');
+  if (list) LIBRARY = list;
   box.innerHTML = '';
-  $('#lib-count').textContent = '共 ' + (list ? list.length : 0) + ' 个 AppID';
-  if (!list || !list.length) {
+  $('#lib-count').textContent = '共 ' + LIBRARY.length + ' 个 AppID';
+  if (!LIBRARY.length) {
     box.innerHTML = '<div class="empty"><b>还没有入库记录</b>在上方搜索或直接输入 AppID</div>';
     return;
   }
-  list.forEach((g) => box.appendChild(coverCard(g, {
+  const shown = LIB_FILTER === 'all' ? LIBRARY : LIBRARY.filter((g) => g.origin === LIB_FILTER);
+  const ownedN = LIBRARY.filter((g) => g.origin === 'owned').length;
+  const fc = $('#lib-filter-count');
+  if (fc) fc.textContent = '· 绿色=原本拥有 ' + ownedN + ' · 橙色=仅工具入库 ' + (LIBRARY.length - ownedN);
+  shown.forEach((g) => box.appendChild(coverCard(g, {
     sel: String(selectedAppid) === String(g.appid),
     onPick: (x) => { selectedAppid = x.appid; },
   })));
-  loadCovers(list);
+  loadCovers(shown);
 }
 
 function renderLock(list) {
@@ -1031,6 +1080,11 @@ function wire() {
     catch (e) { toast(e.message, 'err'); }
   });
   $('#btn-remove').addEventListener('click', doRemove);
+  $$('#lib-filter button[data-f]').forEach((b) => b.addEventListener('click', () => {
+    LIB_FILTER = b.dataset.f;
+    $$('#lib-filter button[data-f]').forEach((x) => x.classList.toggle('on', x === b));
+    renderLibrary();
+  }));
   $('#btn-open-dir').addEventListener('click', async () => {
     try { const d = await call('open_lua_dir'); footer('已打开 ' + d, 'ok'); }
     catch (e) { toast(e.message, 'err'); }

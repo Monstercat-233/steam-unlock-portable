@@ -12,6 +12,7 @@
 - **v2 快速开始**：双击 `入库中心_v2_v3/入库中心.exe`（约 22MB，无需装 Python；界面用系统自带 WebView2，Win10/11 已内置），详见该目录 `使用说明.md`。
 - **v2 界面**：顶栏（账号 chip / Steam 状态 chip / 主题下拉）+ 左侧 186px 导航 + 卡片式主面板 + 状态栏；主题 深色·Midnight（默认）/ 浅色·Daylight / 深色·Nord / 浅色·Solarized，选择记在 exe 同目录 `ui_prefs.json`。改外观只动 `入库中心_v2_v3/src/ui/index.html`。
 - **v2 游戏封面卡片**：入库清单与搜索结果改为卡片墙，自动从 Steam CDN 拉取游戏横版封面（大图在上、游戏名在下），缓存在 exe 同目录 `covers\<AppID>.jpg`，断网复用缓存、无封面（如 DLC）显示占位图。
+- **v2 游戏名称与来源识别**：入库清单直接从 `mygames.lua` 块注释读游戏名（不再显示「未命名」），每张卡片带来源徽章——绿色「Steam 已拥有」（AppID 在本机 Steam 库清单中）/ 橙色「工具入库」（仅由本工具解锁），并可按来源筛选；判断只读本机 Steam 数据、不联网。
 - **v3 启动自检**：打开 exe 后台只读比对已锁定游戏（如剑星）的 buildid/GID，版本变了弹窗提醒重锁重打补丁；只报不改、不常驻。详见 `入库中心_v2_v3/v3自动维护/使用说明.md`。
 - v2/v3 全程不改 v1 产物，两者可共存；`baseline.json` / `audit.log` / `auto_adapt_cache.json` 为机器私有数据，已 `.gitignore` 排除。
 

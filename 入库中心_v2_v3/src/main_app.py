@@ -162,6 +162,56 @@ def _load_html():
     return FALLBACK_HTML
 
 
+# ---------------------------------------------------------------- Steam 真实拥有列表（只读）
+def _steam_library_dirs():
+    """所有 Steam 库目录：主目录 + libraryfolders.vdf 里登记的其它盘。"""
+    try:
+        root = P.find_steam_dir()
+    except Exception:
+        root = None
+    dirs = []
+    if root:
+        root = os.path.normpath(root)
+        dirs.append(root)
+        vdf = os.path.join(root, "steamapps", "libraryfolders.vdf")
+        try:
+            with open(vdf, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            for raw in re.findall(r'"path"\s+"([^"]+)"', text):
+                lib = os.path.normpath(raw.replace("\\\\", "\\"))
+                if lib not in dirs:
+                    dirs.append(lib)
+        except OSError:
+            pass
+    return dirs
+
+
+def _steam_owned_apps():
+    """{appid: 游戏名}：从各库的 appmanifest_*.acf 读，判「用户本来就买的」。"""
+    owned = {}
+    for lib in _steam_library_dirs():
+        sa = os.path.join(lib, "steamapps")
+        try:
+            manifests = [f for f in os.listdir(sa)
+                         if f.startswith("appmanifest_") and f.endswith(".acf")]
+        except OSError:
+            continue
+        for fn in manifests:
+            try:
+                with open(os.path.join(sa, fn), encoding="utf-8", errors="replace") as f:
+                    text = f.read(4096)
+                aid = re.search(r'"appid"\s+"(\d+)"', text)
+                nm = re.search(r'"name"\s+"([^"]+)"', text)
+                if aid:
+                    name = nm.group(1) if nm else ""
+                    # 主库在前，先到先得；同名覆盖时保留非空名字
+                    if aid.group(1) not in owned or (name and not owned[aid.group(1)]):
+                        owned[aid.group(1)] = name
+            except OSError:
+                continue
+    return owned
+
+
 # ---------------------------------------------------------------- 封面（Steam CDN + 本地缓存）
 COVER_URLS = (
     "https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/{appid}/header.jpg",
@@ -264,14 +314,65 @@ class Bridge:
 
     # -- 数据快照
     def _library(self):
+        """入库清单：从 #OSTBLOCK 块里读名字与来源，并对照 Steam 真实拥有列表。
+
+        每个块的注释行形如 `-- 游戏名  [全自动适配]`，名字与写入来源就在其中，
+        比 names.json（只收录少量手工条目）可靠得多；Steam 的 libraryfolders.vdf
+        + appmanifest_*.acf 记录用户真正拥有/安装的游戏，取交集即可区分
+        「本来就买的」与「纯工具入库」。
+        """
         txt = V.read_text()
-        ids = []
-        for m in re.finditer(r"--\s*#OSTBLOCK:(\d+)", txt):
-            a = int(m.group(1))
-            if a not in ids:
-                ids.append(a)
+        lines = txt.splitlines()
+        block_names, block_sources = {}, {}
+        cur = None
+        for line in lines:
+            m = re.search(r"#OSTBLOCK:(\d+)", line)
+            if m:
+                cur = int(m.group(1))
+                block_names.setdefault(cur, "")
+                block_sources.setdefault(cur, "")
+                continue
+            if "#OSTENDBLOCK" in line:
+                cur = None
+                continue
+            if cur is None:
+                continue
+            cm = re.match(r"\s*--\s*(.+?)\s*$", line)
+            if not cm:
+                continue
+            comment = cm.group(1).strip()
+            if not comment or re.match(r"#OST(?:BLOCK|ENDBLOCK)", comment):
+                continue
+            sm = re.search(r"\[([^\]]+)\]", comment)
+            tag = sm.group(1).strip() if sm else ""
+            if not block_sources.get(cur) and tag:
+                block_sources[cur] = tag
+            raw = re.sub(r"\[[^\]]*\]", "", comment).strip()
+            if raw and not block_names.get(cur):
+                block_names[cur] = raw
+
+        owned = _steam_owned_apps()
         names = G.load_names()
-        return [{"appid": a, "name": names.get(str(a), "")} for a in sorted(set(ids))]
+        out = []
+        for a in sorted(set(block_names) | set(block_sources)):
+            aid = str(a)
+            name = block_names.get(a) or ""
+            # `-- 3527290  [全自动适配]` 这类块只有数字，视为没名字，回退 Steam/本地表
+            if name.isdigit():
+                name = ""
+            if not name:
+                name = names.get(aid, "") or owned.get(aid, "")
+            source = block_sources.get(a, "")
+            if aid in owned:
+                origin, origin_label = "owned", "Steam 已拥有"
+            else:
+                origin, origin_label = "tool", "工具入库"
+            out.append({
+                "appid": a, "name": name,
+                "origin": origin, "origin_label": origin_label,
+                "source": source,
+            })
+        return out
 
     def _locklib(self):
         out = []

@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Continue'
 $PY = 'C:\Python314\python.exe'
-$ROOT = 'D:\STEAM入库\全自动入库_v2'
+# 脚本自身所在目录即项目根（去掉旧硬编码路径，换机器/换目录也能打包）
+$ROOT = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $DIR = "$ROOT\src"
 
 $pargs = @(
@@ -18,9 +19,9 @@ $pargs = @(
 
 $exe = "$ROOT\dist\RukuCenter.exe"
 if (-not (Test-Path -LiteralPath $exe)) { Write-Output 'BUILD FAILED: no exe'; exit 1 }
-$dst = "$ROOT\入库中心.exe"
+$dst = "$ROOT\入库管家.exe"
 if (Test-Path -LiteralPath $dst) {
-    $old = "$ROOT\入库中心_old_$(Get-Date -Format yyyyMMdd_HHmmss).exe"
+    $old = "$ROOT\入库管家_old_$(Get-Date -Format yyyyMMdd_HHmmss).exe"
     Move-Item -LiteralPath $dst -Destination $old -Force
 }
 Copy-Item -LiteralPath $exe -Destination $dst -Force

@@ -566,31 +566,27 @@ class Bridge:
         except Exception as e:
             return self._err(e, "锁定失败")
 
-    def import_crackpack(self):
-        """先让用户选 zip/lua，取消则选目录；识别 AppID、锁定 GID、暂存补丁。"""
+    def import_crackpack(self, path=""):
+        """识别破解包 AppID/锁定 GID、暂存补丁。path 由前端传入；为空则弹窗选。"""
         try:
-            path = self._pick_path(dialog="open", title="选破解包(zip/lua)")
             if not path:
-                path = self._pick_path(dialog="folder", title="或选破解包目录")
+                path = self._pick_path(dialog="open", title="选破解包(zip/lua)")
+                if not path:
+                    path = self._pick_path(dialog="folder", title="或选破解包目录")
             if not path:
                 return self._ok(None)
             if isinstance(path, (list, tuple)):
                 path = path[0]
-            appid_s = os.path.basename(path).split("_")[0]
-            lvas, patch_files = V.find_patch_files(path)
-            aid = None
-            for lua in lvas:
-                m = re.search(r"addappid\s*\(\s*(\d{4,})", lua)
-                if m:
-                    aid = int(m.group(1))
-                    break
-            if aid is None and appid_s.isdigit():
-                aid = int(appid_s)
+            result = V.analyze_pack(path)
+            aid = result["appid"]
+            gids = result["gids"]
+            patch_files = result["patch_files"]
             if aid is None:
                 return {"ok": False, "data": None, "error": "没从破解包里识别出 AppID，请手动在版本库补记录"}
-            gids = {}
-            for lua in lvas:
-                gids.update(V.extract_gids(lua))
+            if not gids:
+                return {"ok": False, "data": None,
+                        "error": "识别到 AppID %s，但这个包里没有 setManifestid 锁定 GID；"
+                                 "请换成破解包自带的锁定版 lua/zip（历史版本 GID 只在那里）" % aid}
             info = AA.fetch_app_info(aid)
             V.upsert_lock_block(aid, info.get("name", ""), gids, info, note="导入破解包")
             staged = V.stage_patch(aid, patch_files)
@@ -606,6 +602,33 @@ class Bridge:
                              "locklib": self._locklib(), "library": self._library()})
         except Exception as e:
             return self._err(e, "导入破解包失败")
+
+    def cold_restart(self):
+        """一键冷启动：关 Steam → 备份并清 appinfo.vdf → 重开 Steam。"""
+        try:
+            steam = P.find_steam_dir()
+            if not steam:
+                return {"ok": False, "data": None, "error": "找不到 Steam 安装目录"}
+            stop = P.stop_steam()
+            clear = P.clear_appinfo(steam)
+            start = P.start_steam(steam)
+            B.audit("cold_restart", steam, [str(stop.get("killed")), clear.get("backup_path", "")])
+            return self._ok({
+                "steam_dir": steam,
+                "stop": stop,
+                "clear": clear,
+                "start": start,
+            })
+        except Exception as e:
+            return self._err(e, "一键冷启动失败")
+
+    def pick_patch_file(self):
+        """只选单个文件（锁定版 lua / zip），供破解包导入路径框使用。"""
+        try:
+            return self._ok(self._pick_path(dialog="open", title="选破解包文件(lua/zip)"))
+        except Exception as e:
+            LOG.warning("选择破解包文件失败: %s", e)
+            return self._ok("")
 
     # -- Tab 3 补丁
     def pick_patch(self):
@@ -703,7 +726,9 @@ class Bridge:
                 r = self._window.create_file_dialog(
                     kind,
                     allow_multiple=False,
-                    file_types=("Zip / Lua (*.zip;*.lua)", "所有文件 (*.*)"),
+                    # pywebview parse_file_type 正则描述部分只允许 [\w ]，含 '/'
+                    # 会抛 ValueError 令文件对话框打不开（2026-11-26 bug）
+                    file_types=("Zip Lua (*.zip;*.lua)", "所有文件 (*.*)"),
                 )
         except Exception as e:
             LOG.warning("文件对话框失败: %s", e)

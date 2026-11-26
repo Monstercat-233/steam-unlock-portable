@@ -157,6 +157,33 @@ def find_patch_files(path):
     return lvas, patch_files
 
 
+def analyze_pack(path):
+    """纯识别破解包（单个 lua / zip / 目录）：返回 appid / 锁定 GID / 补丁文件。
+
+    不写任何文件；供 UI 导入前给出明确预览，也让"只传一个 lua"成为一等公民。
+    """
+    lvas, patch_files = find_patch_files(path)
+    gids = {}
+    for lua in lvas:
+        gids.update(extract_gids(lua))
+    aid = None
+    for lua in lvas:
+        m = re.search(r"addappid\s*\(\s*(\d{4,})", lua)
+        if m:
+            aid = int(m.group(1))
+            break
+    if aid is None:
+        stem = os.path.basename(str(path)).split("_")[0]
+        if stem.isdigit():
+            aid = int(stem)
+    return {
+        "appid": aid,
+        "gids": gids,
+        "patch_files": patch_files,
+        "lua_count": len(lvas),
+    }
+
+
 def stage_patch(appid, patch_files):
     """把破解文件按原相对结构复制到 patches/<appid>/，供用户覆盖。"""
     dst_root = os.path.join(PATCH_STORE, str(appid))

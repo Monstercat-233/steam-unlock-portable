@@ -19,6 +19,8 @@ src/README.md
 
 # 运行时缓存（含本机 appid 信息，不入仓库）
 auto_adapt_cache.json
+covers/
+入库中心_v2_v3/covers/
 
 # 机器私有数据：账号 / 家庭组 / 备份 / appinfo 缓存，绝不入库
 audit.log

@@ -440,8 +440,16 @@ footer .path{font-family:var(--mono);font-size:10.5px;opacity:.8;max-width:46%;o
         </div>
         <div class="bd" style="border-top:1px solid var(--line)">
           <div class="row">
+            <div class="field" style="flex:1">
+              <label>破解包路径（单个锁定版 lua / zip / 目录）</label>
+              <input type="text" id="pack-path" class="grow-input" placeholder="可直接粘贴路径，或点浏览选择单个 .lua 文件">
+              <button class="ghost" id="btn-browse-pack">浏览…</button>
+            </div>
+          </div>
+          <div class="row">
             <button class="primary" id="btn-apply-lock">应用锁定到入库清单</button>
-            <button class="ghost" id="btn-import-pack">导入破解包（zip / 目录 / lua）</button>
+            <button class="ghost" id="btn-import-pack">导入破解包</button>
+            <button class="ghost" id="btn-cold-restart">一键冷启动（关 Steam → 清缓存 → 重开）</button>
           </div>
           <div class="inline-status" id="st-lock"></div>
         </div>
@@ -456,11 +464,10 @@ footer .path{font-family:var(--mono);font-size:10.5px;opacity:.8;max-width:46%;o
         <div class="hd"><h2>固定版本操作指引</h2></div>
         <div class="bd">
           <ol class="steps">
-            <li>完全关闭 <b>Steam</b>（含托盘）。</li>
-            <li>删除 <span class="mono">&lt;Steam&gt;/appcache/appinfo.vdf</span>。</li>
-            <li>冷启动 Steam。</li>
-            <li>核对 <span class="mono">content_log</span> 的 Downloading GID 是锁定值。</li>
-            <li>下载完把暂存补丁覆盖进游戏目录再启动。</li>
+            <li>导入破解包 → 选中游戏点「应用锁定」（锁定 GID 写入清单）。</li>
+            <li>点「一键冷启动」：自动关 Steam、备份并清 <span class="mono">appinfo.vdf</span>、重开。</li>
+            <li>核对 <span class="mono">content_log</span> 的 Downloading GID 是锁定值，等待下载完成。</li>
+            <li>到「应用补丁」tab 选 <span class="mono">_crack_ready</span> 覆盖补丁，关 Steam 直接运行游戏验证。</li>
           </ol>
         </div>
       </div>
@@ -913,18 +920,44 @@ async function doApplyLock() {
   finally { busy(btn, false); }
 }
 
+async function doBrowsePack() {
+  try {
+    // 复用补丁浏览：优先选单个文件（锁定版 lua/zip 也在此列），拿到后填进破解包路径框
+    const p = await call('pick_patch_file');
+    if (p) $('#pack-path').value = p;
+  } catch (e) { toast(e.message, 'err'); }
+}
+
 async function doImportPack() {
   const btn = $('#btn-import-pack');
+  const path = ($('#pack-path').value || '').trim();
   busy(btn, true);
-  inline('#st-lock', '等待选择破解包…', 'info', true);
+  inline('#st-lock', path ? '识别破解包…' : '等待选择破解包…', 'info', true);
   try {
-    const r = await call('import_crackpack');
+    const r = await call('import_crackpack', path);
     if (!r) { inline('#st-lock', '已取消', ''); return; }
     renderLock(r.locklib);
     renderLibrary(r.library);
     inline('#st-lock', '已导入 ' + r.appid + '：' + r.gid_count + ' 个 GID 锁定 + ' + r.staged + ' 个补丁文件暂存', 'ok');
     toast('破解包导入完成', 'ok');
   } catch (e) { inline('#st-lock', e.message, 'err'); toast(e.message, 'err', 6000); }
+  finally { busy(btn, false); }
+}
+
+async function doColdRestart() {
+  const btn = $('#btn-cold-restart');
+  busy(btn, true);
+  inline('#st-lock', '正在关闭 Steam 并清理缓存…', 'info', true);
+  try {
+    const r = await call('cold_restart');
+    const d = r || {};
+    const msg = '已冷启动：关掉 ' + ((d.stop && d.stop.killed || []).join('/') || '无进程') +
+      '；' + (d.clear && d.clear.removed ? '缓存已清（备份于 ' + d.clear.backup_path + '）' : '缓存本就干净') +
+      '；Steam 已重开' + ((d.start && d.start.pid) ? '（PID ' + d.start.pid + '）' : '');
+    inline('#st-lock', msg, 'ok');
+    toast('一键冷启动完成，去核对 content_log 的 GID', 'ok', 8000);
+    footer(msg, 'ok');
+  } catch (e) { inline('#st-lock', e.message, 'err'); toast(e.message, 'err', 8000); }
   finally { busy(btn, false); }
 }
 
@@ -1095,6 +1128,8 @@ function wire() {
   });
   $('#btn-apply-lock').addEventListener('click', doApplyLock);
   $('#btn-import-pack').addEventListener('click', doImportPack);
+  $('#btn-browse-pack').addEventListener('click', doBrowsePack);
+  $('#btn-cold-restart').addEventListener('click', doColdRestart);
   $('#btn-browse').addEventListener('click', doBrowse);
   $('#btn-dry').addEventListener('click', doScan);
   $('#btn-apply-patch').addEventListener('click', doApplyPatch);

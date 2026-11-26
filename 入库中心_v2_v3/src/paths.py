@@ -175,3 +175,93 @@ def steam_running():
         return "steam.exe" in out
     except Exception:
         return False
+
+
+def stop_steam(timeout=4):
+    """优雅关 Steam（含子进程），超时强杀。返回 killed 进程名列表。"""
+    targets = ("steam.exe", "steamwebhelper.exe", "crashhandler.exe")
+    killed = []
+    for graceful in (False, True):
+        for name in targets:
+            args = ["taskkill", "/IM", name, "/T"]
+            if graceful:
+                args.append("/F")
+            try:
+                r = subprocess.run(args, capture_output=True, text=True, timeout=10)
+                if r.returncode == 0 and name not in killed:
+                    killed.append(name)
+            except Exception:
+                pass
+        if graceful:
+            break
+        # 等优雅退出生效；仍存活才强杀
+        try:
+            out = subprocess.run(["tasklist"], capture_output=True, text=True, timeout=10).stdout.lower()
+            if not any(n in out for n in targets):
+                break
+        except Exception:
+            pass
+        import time as _t
+        _t.sleep(timeout)
+    # 二次强杀兜底
+    for name in targets:
+        try:
+            r = subprocess.run(["taskkill", "/IM", name, "/T", "/F"],
+                               capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and name not in killed:
+                killed.append(name)
+        except Exception:
+            pass
+    return {"killed": killed}
+
+
+def clear_appinfo(steam_dir=None):
+    """备份并删除 appinfo.vdf + appinfo/ 目录，冷启动前清缓存。"""
+    steam_dir = steam_dir or find_steam_dir()
+    result = {"removed": False, "backup_path": ""}
+    if not steam_dir:
+        return result
+    appcache = os.path.join(steam_dir, "appcache")
+    vdf = os.path.join(appcache, "appinfo.vdf")
+    idir = os.path.join(appcache, "appinfo")
+    existed = os.path.isfile(vdf) or os.path.isdir(idir)
+    if not existed:
+        return result
+    import shutil as _sh
+    from datetime import datetime as _dt
+    backup_root = os.path.join(writable_dir(), "backup")
+    stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+    dst = os.path.join(backup_root, "appinfo_%s" % stamp)
+    try:
+        os.makedirs(dst, exist_ok=True)
+        if os.path.isfile(vdf):
+            _sh.copy2(vdf, os.path.join(dst, "appinfo.vdf"))
+        if os.path.isdir(idir):
+            _sh.copytree(idir, os.path.join(dst, "appinfo"), dirs_exist_ok=True)
+        result["backup_path"] = dst
+    except Exception:
+        pass
+    try:
+        if os.path.isfile(vdf):
+            os.remove(vdf)
+        if os.path.isdir(idir):
+            _sh.rmtree(idir)
+        result["removed"] = True
+    except Exception:
+        pass
+    return result
+
+
+def start_steam(steam_dir=None):
+    """冷启动 Steam。返回是否成功拉起与 PID。"""
+    steam_dir = steam_dir or find_steam_dir()
+    if not steam_dir:
+        return {"started": False, "pid": None}
+    exe = os.path.join(steam_dir, "steam.exe")
+    if not os.path.isfile(exe):
+        exe = os.path.join(steam_dir, "Steam.exe")
+    try:
+        p = subprocess.Popen([exe], cwd=steam_dir)
+        return {"started": True, "pid": p.pid}
+    except Exception:
+        return {"started": False, "pid": None}

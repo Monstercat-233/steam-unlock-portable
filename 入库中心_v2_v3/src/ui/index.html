@@ -418,6 +418,21 @@ footer .path{font-family:var(--mono);font-size:10.5px;opacity:.8;max-width:46%;o
           </div>
           <div id="tb-lib" class="cover-grid"></div>
         </div>
+        <div class="bd" style="border-top:1px solid var(--line)">
+          <div class="hd" style="padding:0 0 8px"><h2 style="font-size:15px">联机模式</h2>
+            <span class="sub">给选中的游戏设 Steamworks 大厅/P2P 联机（按账号隔离）</span></div>
+          <div class="row">
+            <span id="online-acc" class="sub">账号：—</span>
+            <div class="grow"></div>
+            <button class="sm ghost" id="btn-online-status">查看适配</button>
+            <button class="sm ghost" id="btn-online-off">取消联机</button>
+            <button class="sm primary" id="btn-online-on">设为联机</button>
+          </div>
+          <div id="st-online" class="note" style="margin-top:8px;display:none"></div>
+          <div class="sub" style="margin-top:8px;font-size:12px;line-height:1.6">
+            仅对 Steamworks 大厅/P2P 有效（双方都要设）；EOS/专用服务器/自有账号游戏无效。<b>同时只能一个联机游戏。</b>切换会重启 Steam；改前自动备份配置。
+          </div>
+        </div>
       </div>
     </section>
 
@@ -831,6 +846,8 @@ function renderAccounts(payload) {
     sel.selectedIndex = payload.index;
   }
   $('#chip-acc').querySelector('span:last-child').textContent = payload.current || '未登录';
+  const oa = $('#online-acc');
+  if (oa) { const op = sel.options[sel.selectedIndex]; oa.textContent = '账号：' + (op ? op.text : '未选'); }
 }
 
 function applyTheme(name) {
@@ -960,6 +977,57 @@ async function doColdRestart() {
     toast('一键冷启动完成：自动更新已关、缓存已清，去核对 content_log 的 GID', 'ok', 8000);
     footer(msg, 'ok');
   } catch (e) { inline('#st-lock', e.message, 'err'); toast(e.message, 'err', 8000); }
+  finally { busy(btn, false); }
+}
+
+function onlineAccLabel() {
+  const sel = $('#acc');
+  const o = sel && sel.options[sel.selectedIndex];
+  return { index: sel ? sel.selectedIndex : -1, label: o ? o.text : '未选账号' };
+}
+
+function showOnlineInfo(html, kind) {
+  const box = $('#st-online');
+  box.style.display = 'block';
+  box.className = 'note' + (kind ? ' ' + kind : '');
+  box.innerHTML = html;
+}
+
+async function doOnlineStatus() {
+  if (selectedAppid == null) { toast('先在游戏卡片里选一个', 'warn'); return; }
+  const acc = onlineAccLabel();
+  try {
+    const d = await call('online_status', selectedAppid, acc.index) || {};
+    const cls = d.classify || {};
+    const lv = cls.level;
+    const color = lv === 'ok' ? 'ok' : lv === 'warn' ? 'warn' : 'bad';
+    const tag = { ok: '✅ 可联机', warn: '⚠ 谨慎联机', blocked: '⛔ 不支持', na: '— 不适用' }[lv] || lv;
+    showOnlineInfo('<b>' + tag + '</b> · ' + (d.name || selectedAppid) + ' · ' + (d.account || '') +
+      '<br>' + (cls.reason || '') +
+      '<br>当前启动选项：<span class="mono">' + (d.launch_value || '（空）') + '</span>' +
+      (d.error ? '<br><span class="warn">' + d.error + '</span>' : ''), color);
+  } catch (e) { showOnlineInfo(e.message, 'bad'); }
+}
+
+async function doOnline(enable) {
+  if (selectedAppid == null) { toast('先在游戏卡片里选一个', 'warn'); return; }
+  const acc = onlineAccLabel();
+  if (acc.index < 0) { toast('先选账号', 'warn'); return; }
+  const btn = enable ? $('#btn-online-on') : $('#btn-online-off');
+  busy(btn, true);
+  showOnlineInfo('正在关 Steam 并写入启动选项…', '');
+  try {
+    const d = await call('set_online_mode', selectedAppid, acc.index, enable) || {};
+    if (!d.changed) {
+      showOnlineInfo((enable ? '已经是联机模式，无需改动' : '本来就没设联机') + '<br>启动选项：<span class="mono">' + (d.new_value || '（空）') + '</span>', 'ok');
+      return;
+    }
+    showOnlineInfo('<b>' + (enable ? '✅ 已设为联机' : '✅ 已取消联机') + '</b> · ' + (d.account || '') +
+      '<br>启动选项：<span class="mono">' + (d.old_value || '（空）') + ' → ' + (d.new_value || '（空）') + '</span>' +
+      '<br>Steam 已重开；改前备份于 ' + d.backup, 'ok');
+    toast('完成，Steam 已重开，去核对游戏属性里的启动选项', 'ok', 8000);
+    footer('联机模式已' + (enable ? '开启' : '关闭'), 'ok');
+  } catch (e) { showOnlineInfo(e.message, 'bad'); toast(e.message, 'err', 8000); }
   finally { busy(btn, false); }
 }
 
@@ -1124,6 +1192,9 @@ function wire() {
     try { const d = await call('open_lua_dir'); footer('已打开 ' + d, 'ok'); }
     catch (e) { toast(e.message, 'err'); }
   });
+  $('#btn-online-status').addEventListener('click', doOnlineStatus);
+  $('#btn-online-on').addEventListener('click', () => doOnline(true));
+  $('#btn-online-off').addEventListener('click', () => doOnline(false));
   $('#btn-refresh-lock').addEventListener('click', async () => {
     try { renderLock(await call('list_locklib')); footer('破解库已刷新', 'ok'); }
     catch (e) { toast(e.message, 'err'); }

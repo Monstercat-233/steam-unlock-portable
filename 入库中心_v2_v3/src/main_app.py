@@ -29,6 +29,7 @@ import apply_patch as AP
 import game_index as G
 import backup as B
 import update_guard as UG
+import online_mode as OM
 
 try:  # 界面层依赖；缺失时 main() 给出明确提示而不是 ImportError 崩溃
     import webview
@@ -632,6 +633,72 @@ class Bridge:
             })
         except Exception as e:
             return self._err(e, "一键冷启动失败")
+
+    def online_status(self, appid, account_index):
+        """预览某账号/游戏的联机适配分类与当前启动选项（只读）。"""
+        try:
+            appid = str(appid)
+            info = AA.fetch_app_info(int(appid))
+            cls = OM.classify(appid, info)
+            acc = None
+            i = int(account_index) if str(account_index).lstrip("-").isdigit() else -1
+            if 0 <= i < len(self._accounts):
+                acc = self._accounts[i]
+            aid = str(acc["accountid"]) if acc else ""
+            cur = OM.read_online_flag(aid, appid) if aid else {
+                "ok": False, "enabled": False, "value": "", "error": "未选账号"}
+            return self._ok({
+                "appid": appid, "name": info.get("name", ""),
+                "classify": cls, "account": account_label(acc) if acc else "未选账号",
+                "enabled": cur["enabled"], "launch_value": cur["value"],
+                "error": cur.get("error", ""),
+            })
+        except Exception as e:
+            return self._err(e, "读取联机状态失败")
+
+    def set_online_mode(self, appid, account_index, enable):
+        """设为/取消联机模式：关 Steam → 精确改 LaunchOptions → 重开。
+
+        Steam 运行时会覆写 localconfig.vdf，必须停了再改。不清 appinfo（联机参数
+        与 manifest 无关，清缓存反而可能触发多余重检）。改前整文件备份。
+        """
+        try:
+            appid = str(appid)
+            acc = None
+            i = int(account_index) if str(account_index).lstrip("-").isdigit() else -1
+            if 0 <= i < len(self._accounts):
+                acc = self._accounts[i]
+            if not acc:
+                return {"ok": False, "data": None, "error": "未选账号"}
+            aid = str(acc["accountid"])
+            info = AA.fetch_app_info(int(appid))
+            cls = OM.classify(appid, info)
+            # blocked/na 硬拦；warn 允许但前端已提示风险
+            if cls["level"] in ("blocked", "na"):
+                return {"ok": False, "data": None,
+                        "error": "该类游戏不适合 -onlinefix：%s" % cls["reason"]}
+
+            steam = P.find_steam_dir()
+            if not steam:
+                return {"ok": False, "data": None, "error": "找不到 Steam 安装目录"}
+            stop = P.stop_steam()
+            flag = OM.set_online_flag(aid, appid, bool(enable))
+            start = P.start_steam(steam)
+            B.audit("online_mode", "%s/%s" % (aid, appid), [
+                "on" if enable else "off", str(flag.get("changed")), flag.get("backup", "")])
+            if not flag.get("ok"):
+                return {"ok": False, "data": None,
+                        "error": "写入启动选项失败：%s" % flag.get("error", "")}
+            return self._ok({
+                "appid": appid, "account": account_label(acc),
+                "enabled": bool(enable), "changed": flag["changed"],
+                "old_value": flag["old_value"], "new_value": flag["new_value"],
+                "backup": flag["backup"],
+                "stop": stop, "start": start,
+                "classify": cls,
+            })
+        except Exception as e:
+            return self._err(e, "设置联机模式失败")
 
     def pick_patch_file(self):
         """只选单个文件（锁定版 lua / zip），供破解包导入路径框使用。"""

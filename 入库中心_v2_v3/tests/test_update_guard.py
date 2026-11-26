@@ -96,3 +96,32 @@ def test_format_report_mentions_fix(monkeypatch):
     report = UG.format_report(UG.check_updates())
     assert "AutoUpdateBehavior" in report
     assert "ScheduledAutoUpdate" in report
+
+
+def test_reset_auto_update_zeros_locked_app_only(tmp_path, monkeypatch):
+    """reset_auto_update 只把已锁定游戏的 acf 两字段归零，改前备份，不碰其他游戏。"""
+    import os
+    import update_guard as UG
+
+    lib = tmp_path / "lib"
+    steamapps = lib / "steamapps"
+    steamapps.mkdir(parents=True)
+    acf = steamapps / "appmanifest_3489700.acf"
+    acf.write_text(
+        '"AppState"\n{\n\t"appid"  "3489700"\n'
+        '\t"AutoUpdateBehavior"  "1"\n\t"ScheduledAutoUpdate"  "1795616720"\n'
+        '\t"buildid"  "26123051"\n}\n', encoding="utf-8")
+    other = steamapps / "appmanifest_999.acf"
+    other.write_text('"AppState"\n{\n\t"AutoUpdateBehavior"  "1"\n}\n', encoding="utf-8")
+
+    monkeypatch.setattr(UG, "library_dirs", lambda: [str(lib)])
+    monkeypatch.setattr(UG, "locked_apps", lambda: copy.deepcopy(_LOCKED))
+    monkeypatch.setattr(UG, "writable_dir", lambda: str(tmp_path / "writable"), raising=False)
+
+    r = UG.reset_auto_update()
+    txt = acf.read_text(encoding="utf-8")
+    assert '"AutoUpdateBehavior"  "0"' in txt
+    assert '"ScheduledAutoUpdate"  "0"' in txt
+    assert other.read_text(encoding="utf-8").count('"1"') == 1  # 未锁定游戏没被动
+    assert r["changed"] == ["3489700"], r
+    assert r["backups"] and all(os.path.exists(b) for b in r["backups"].values())

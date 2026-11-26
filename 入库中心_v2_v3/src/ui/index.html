@@ -449,7 +449,7 @@ footer .path{font-family:var(--mono);font-size:10.5px;opacity:.8;max-width:46%;o
           <div class="row">
             <button class="primary" id="btn-apply-lock">应用锁定到入库清单</button>
             <button class="ghost" id="btn-import-pack">导入破解包</button>
-            <button class="ghost" id="btn-cold-restart">一键冷启动（关 Steam → 清缓存 → 重开）</button>
+            <button class="ghost" id="btn-cold-restart">一键冷启动（关 Steam → 关自动更新 → 清缓存 → 重开）</button>
           </div>
           <div class="inline-status" id="st-lock"></div>
         </div>
@@ -951,11 +951,13 @@ async function doColdRestart() {
   try {
     const r = await call('cold_restart');
     const d = r || {};
+    const reset = d.reset && d.reset.changed || [];
     const msg = '已冷启动：关掉 ' + ((d.stop && d.stop.killed || []).join('/') || '无进程') +
+      '；' + (reset.length ? '已关闭 ' + reset.join('/') + ' 的自动更新' : '自动更新本就关闭') +
       '；' + (d.clear && d.clear.removed ? '缓存已清（备份于 ' + d.clear.backup_path + '）' : '缓存本就干净') +
       '；Steam 已重开' + ((d.start && d.start.pid) ? '（PID ' + d.start.pid + '）' : '');
     inline('#st-lock', msg, 'ok');
-    toast('一键冷启动完成，去核对 content_log 的 GID', 'ok', 8000);
+    toast('一键冷启动完成：自动更新已关、缓存已清，去核对 content_log 的 GID', 'ok', 8000);
     footer(msg, 'ok');
   } catch (e) { inline('#st-lock', e.message, 'err'); toast(e.message, 'err', 8000); }
   finally { busy(btn, false); }

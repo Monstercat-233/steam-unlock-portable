@@ -604,18 +604,29 @@ class Bridge:
             return self._err(e, "导入破解包失败")
 
     def cold_restart(self):
-        """一键冷启动：关 Steam → 备份并清 appinfo.vdf → 重开 Steam。"""
+        """一键冷启动：关 Steam → 锁定游戏自动更新字段归零 → 清 appinfo.vdf → 重开。
+
+        换账号登录后 Steam 会把 AutoUpdateBehavior 同步回 1，导致校验时清掉破解
+        emu dll。这里趁 Steam 已停，把锁定游戏的这两个字段归零再重开，避免回弹。
+        """
         try:
             steam = P.find_steam_dir()
             if not steam:
                 return {"ok": False, "data": None, "error": "找不到 Steam 安装目录"}
             stop = P.stop_steam()
+            # Steam 已退出，此时改 appmanifest 不会被覆写。
+            reset = UG.reset_auto_update()
             clear = P.clear_appinfo(steam)
             start = P.start_steam(steam)
-            B.audit("cold_restart", steam, [str(stop.get("killed")), clear.get("backup_path", "")])
+            B.audit("cold_restart", steam, [
+                str(stop.get("killed")),
+                str(reset.get("changed")),
+                clear.get("backup_path", ""),
+            ])
             return self._ok({
                 "steam_dir": steam,
                 "stop": stop,
+                "reset": reset,
                 "clear": clear,
                 "start": start,
             })

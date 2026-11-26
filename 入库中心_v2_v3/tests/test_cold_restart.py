@@ -41,9 +41,11 @@ def test_cold_restart_api(monkeypatch):
     monkeypatch.setattr(main_app.P, "find_steam_dir", lambda: r"D:\Steam")
     monkeypatch.setattr(main_app.P, "stop_steam", lambda: calls.append("stop") or {"killed": ["steam.exe"]})
     monkeypatch.setattr(main_app.P, "clear_appinfo", lambda s: calls.append("clear") or {"removed": True, "backup_path": "bk"})
+    monkeypatch.setattr(main_app.UG, "reset_auto_update", lambda: calls.append("reset") or {"changed": ["3489700"], "backups": {}})
     monkeypatch.setattr(main_app.P, "start_steam", lambda s: calls.append("start") or {"started": True, "pid": 1})
 
     r = b.cold_restart()
-    assert calls == ["stop", "clear", "start"]
+    assert calls == ["stop", "reset", "clear", "start"]
     assert r["ok"] is True
     assert r["data"]["steam_dir"] == r"D:\Steam"
+    assert r["data"]["reset"]["changed"] == ["3489700"]

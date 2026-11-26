@@ -14,6 +14,9 @@ import paths as P
 
 BASELINE_PATH = os.path.join(P.writable_dir(), "baseline.json")
 
+# 模块级别名：与 P.writable_dir 同源，便于测试注入隔离的备份目录。
+writable_dir = P.writable_dir
+
 _ADVICE = (
     "本体疑似被更新，补丁可能失效：请到版本锁定 tab 重锁重打，"
     "确认前不要启动游戏。"
@@ -96,6 +99,54 @@ def locked_apps():
         if isinstance(rec, dict) and rec.get("verified") and rec.get("locked_gids"):
             out[str(appid)] = rec
     return out
+
+
+def reset_auto_update():
+    """把已锁定游戏的 appmanifest 自动更新字段归零（纯本地，改前备份）。
+
+    只动 crack_library 中 verified 且带 locked_gids 的游戏；未锁定游戏不碰。
+    每个要改的 acf 先原样备份到 <writable_dir>/backup/appmanifest_<appid>_<stamp>.acf，
+    再把 AutoUpdateBehavior/ScheduledAutoUpdate 的引号值替换为 "0"。
+    必须在 Steam 退出后调用，否则改动会被 Steam 覆写。
+    返回 {changed:[appid,...], backups:{appid:path}}。
+    """
+    result = {"changed": [], "backups": {}}
+    locked = locked_apps()
+    if not locked:
+        return result
+    dirs = library_dirs()
+    import shutil as _sh
+    from datetime import datetime as _dt
+
+    stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+    backup_root = os.path.join(writable_dir(), "backup")
+    for appid in locked:
+        target = None
+        for d in dirs:
+            acf = os.path.join(d, "steamapps", "appmanifest_%s.acf" % appid)
+            if os.path.isfile(acf):
+                target = acf
+                break
+        if not target:
+            continue
+        try:
+            text = _read_text(target)
+            if text is None:
+                continue
+            new = re.sub(r'("AutoUpdateBehavior"\s+")[^"]*(")', r'\g<1>0\g<2>', text)
+            new = re.sub(r'("ScheduledAutoUpdate"\s+")[^"]*(")', r'\g<1>0\g<2>', new)
+            if new == text:
+                continue  # 已经是 0，无需改动
+            os.makedirs(backup_root, exist_ok=True)
+            bk = os.path.join(backup_root, "appmanifest_%s_%s.acf.bak" % (appid, stamp))
+            _sh.copy2(target, bk)
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(new)
+            result["changed"].append(appid)
+            result["backups"][appid] = bk
+        except OSError:
+            continue
+    return result
 
 
 def _load_baseline():
